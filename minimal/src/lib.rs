@@ -11,8 +11,7 @@ use ash::{
     util::Align,
     vk::{self, Packed24_8},
 };
-use vulkano::image::{StorageImage, ImageUsage};
-use vulkano_util::{window::{VulkanoWindows, WindowDescriptor}, context::VulkanoContext};
+use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
@@ -45,6 +44,51 @@ fn main() {
 }
 
 fn _main(event_loop: EventLoop<()>) {
+    let mut config = VulkanoConfig::default();
+    config.device_extensions.khr_deferred_host_operations = true;
+    config.device_extensions.khr_acceleration_structure = true;
+    config.device_extensions.khr_ray_tracing_pipeline = true;
+    let context = VulkanoContext::new(config);
+    let mut windows = VulkanoWindows::default();
+
+    event_loop.run(move |event, event_loop, control_flow| match event {
+        Event::Resumed => {
+            log::debug!("Event::Resumed");
+            windows.create_window(&event_loop, &context,
+                &WindowDescriptor::default(), |_|{});
+        }
+        Event::Suspended => {
+            log::debug!("Event::Suspended");
+            windows.remove_renderer(windows.primary_window_id().unwrap());
+        }
+        Event::WindowEvent { event , .. } => match event {
+            WindowEvent::CloseRequested => {
+                log::debug!("WindowEvent::CloseRequested");
+                *control_flow = ControlFlow::Exit;
+            }
+            WindowEvent::Resized(_) => {
+                log::debug!("WindowEvent::Resized");
+                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                log::debug!("WindowEvent::ScaleFactorChanged");
+                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+            }
+            _ => ()
+        }
+        Event::RedrawRequested(_) => {
+            if let Some(renderer) = windows.get_primary_renderer_mut() {
+                let gpu_future = renderer.acquire().unwrap();
+
+                renderer.present(gpu_future, true);
+            }
+        }
+        Event::MainEventsCleared => {
+            if let Some(renderer) = windows.get_primary_renderer() { renderer.window().request_redraw() }
+        }
+        _ => (),
+    });
+
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
     const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;

@@ -1,6 +1,6 @@
 # vulkano-raytracing-demo
 
-An example of KHR raytracing using [vulkano](https://github.com/vulkano-rs/vulkano), [ash](https://github.com/MaikKlein/ash) and [rust-gpu](https://github.com/EmbarkStudios/rust-gpu).
+An example of KHR raytracing using [vulkano](https://github.com/vulkano-rs/vulkano) and [rust-gpu](https://github.com/EmbarkStudios/rust-gpu).
 
 ## Run desktop client
 
