@@ -32,6 +32,6 @@ name = "main"
 crate_type = ["cdylib"]
 
 [[bin]]
-name = "vulkano-android"
+name = "minimal"
 path="src/lib.rs"
 required-features = [ "desktop" ]

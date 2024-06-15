@@ -1,21 +1,8 @@
-use std::{
-    collections::HashSet,
-    ffi::{c_void, CStr, CString},
-    fs::File,
-    io::Write,
-    os::raw::c_char,
-    ptr::{self, null},
-};
-use ash::{
-    prelude::VkResult,
-    util::Align,
-    vk::{self, Packed24_8},
-};
+use std::{fs::File, io::Write, ptr::{self, null}};
+use ash::{prelude::VkResult, util::Align, vk::{self, Packed24_8}};
+use vulkano::VulkanObject;
 use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
-};
+use winit::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop, EventLoopBuilder}};
 
 #[repr(C)]
 #[derive(Clone, Debug, Copy)]
@@ -48,7 +35,10 @@ fn _main(event_loop: EventLoop<()>) {
     config.device_extensions.khr_deferred_host_operations = true;
     config.device_extensions.khr_acceleration_structure = true;
     config.device_extensions.khr_ray_tracing_pipeline = true;
+    config.device_features.acceleration_structure = true;
+    config.device_features.ray_tracing_pipeline = true;
     let context = VulkanoContext::new(config);
+    draw_image(&context);
     let mut windows = VulkanoWindows::default();
 
     event_loop.run(move |event, event_loop, control_flow| match event {
@@ -88,119 +78,29 @@ fn _main(event_loop: EventLoop<()>) {
         }
         _ => (),
     });
+}
+
+fn draw_image(context: &VulkanoContext) {
+    let entry = unsafe { ash::Entry::load() }.unwrap();
+    let instance = unsafe { ash::Instance::load(entry.static_fn(), context.instance().handle()) };
+    let device = unsafe { ash::Device::load(instance.fp_v1_0(), context.device().handle()) };
+    let queue_family_index = context.graphics_queue().queue_family_index();
 
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
     const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
-    let entry = unsafe { ash::Entry::load() }.unwrap();
-
-    let instance = {
-        let application_name = CString::new("Hello Triangle").unwrap();
-        let engine_name = CString::new("No Engine").unwrap();
-
-        let mut debug_utils_create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::WARNING |
-            // vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
-            // vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
-            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
-            )
-            .pfn_user_callback(Some(default_vulkan_debug_utils_callback))
-            .build();
-
-        let application_info = vk::ApplicationInfo::builder()
-            .application_name(application_name.as_c_str())
-            .application_version(vk::make_api_version(0, 1, 0, 0))
-            .engine_name(engine_name.as_c_str())
-            .engine_version(vk::make_api_version(0, 1, 0, 0))
-            .api_version(vk::API_VERSION_1_2)
-            .build();
-
-        let instance_create_info = vk::InstanceCreateInfo::builder()
-            .application_info(&application_info)
-            .build();
-
-        unsafe { entry.create_instance(&instance_create_info, None) }
-            .expect("failed to create instance!")
-    };
-
-    let (physical_device, queue_family_index) = pick_physical_device_and_queue_family_indices(
-        &instance,
-        &[
-            ash::extensions::khr::AccelerationStructure::name(),
-            ash::extensions::khr::DeferredHostOperations::name(),
-            ash::extensions::khr::RayTracingPipeline::name(),
-        ],
-    )
-    .unwrap()
-    .unwrap();
-
-    let device: ash::Device = {
-        let priorities = [1.0];
-
-        let queue_create_info = vk::DeviceQueueCreateInfo::builder()
-            .queue_family_index(queue_family_index)
-            .queue_priorities(&priorities)
-            .build();
-
-        let mut features2 = vk::PhysicalDeviceFeatures2::default();
-        unsafe {
-            (instance.fp_v1_1().get_physical_device_features2)(physical_device, &mut features2)
-        };
-
-        let mut features12 = vk::PhysicalDeviceVulkan12Features::builder()
-            .buffer_device_address(true)
-            .vulkan_memory_model(true)
-            .build();
-
-        let mut as_feature = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::builder()
-            .acceleration_structure(true)
-            .build();
-
-        let mut raytracing_pipeline = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::builder()
-            .ray_tracing_pipeline(true)
-            .build();
-
-        let enabled_extension_names = [
-            ash::extensions::khr::RayTracingPipeline::name().as_ptr(),
-            ash::extensions::khr::AccelerationStructure::name().as_ptr(),
-            ash::extensions::khr::DeferredHostOperations::name().as_ptr(),
-            vk::KhrSpirv14Fn::name().as_ptr(),
-            vk::ExtScalarBlockLayoutFn::name().as_ptr(),
-            vk::KhrGetMemoryRequirements2Fn::name().as_ptr(),
-        ];
-
-        let device_create_info = vk::DeviceCreateInfo::builder()
-            .push_next(&mut features2)
-            .push_next(&mut features12)
-            .push_next(&mut as_feature)
-            .push_next(&mut raytracing_pipeline)
-            .queue_create_infos(&[queue_create_info])
-            .enabled_extension_names(&enabled_extension_names)
-            .build();
-
-        unsafe { instance.create_device(physical_device, &device_create_info, None) }
-            .expect("Failed to create logical Device!")
-    };
-
     let mut rt_pipeline_properties = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
-
     {
         let mut physical_device_properties2 = vk::PhysicalDeviceProperties2::builder()
             .push_next(&mut rt_pipeline_properties)
             .build();
 
         unsafe {
-            instance
-                .get_physical_device_properties2(physical_device, &mut physical_device_properties2);
+            instance.get_physical_device_properties2(context.device().physical_device().handle(), &mut physical_device_properties2);
         }
     }
+
     let acceleration_structure =
         ash::extensions::khr::AccelerationStructure::new(&instance, &device);
 
@@ -218,7 +118,7 @@ fn _main(event_loop: EventLoop<()>) {
     };
 
     let device_memory_properties =
-        unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        unsafe { instance.get_physical_device_memory_properties(context.device().physical_device().handle()) };
 
     let image = {
         let image_create_info = vk::ImageCreateInfo::builder()
@@ -1356,53 +1256,6 @@ fn _main(event_loop: EventLoop<()>) {
         vertex_buffer.destroy(&device);
         index_buffer.destroy(&device);
     }
-
-    unsafe {
-        device.destroy_device(None);
-    }
-
-    unsafe {
-        instance.destroy_instance(None);
-    }
-}
-
-fn pick_physical_device_and_queue_family_indices(
-    instance: &ash::Instance,
-    extensions: &[&CStr],
-) -> VkResult<Option<(vk::PhysicalDevice, u32)>> {
-    Ok(unsafe { instance.enumerate_physical_devices() }?
-        .into_iter()
-        .find_map(|physical_device| {
-            let has_all_extesions =
-                unsafe { instance.enumerate_device_extension_properties(physical_device) }.map(
-                    |exts| {
-                        let set: HashSet<&CStr> = exts
-                            .iter()
-                            .map(|ext| unsafe {
-                                CStr::from_ptr(&ext.extension_name as *const c_char)
-                            })
-                            .collect();
-
-                        extensions.iter().all(|ext| set.contains(ext))
-                    },
-                );
-            if has_all_extesions != Ok(true) {
-                return None;
-            }
-
-            let graphics_family =
-                unsafe { instance.get_physical_device_queue_family_properties(physical_device) }
-                    .into_iter()
-                    .enumerate()
-                    .find(|(_, device_properties)| {
-                        device_properties.queue_count > 0
-                            && device_properties
-                                .queue_flags
-                                .contains(vk::QueueFlags::GRAPHICS)
-                    });
-
-            graphics_family.map(|(i, _)| (physical_device, i as u32))
-        }))
 }
 
 unsafe fn create_shader_module(device: &ash::Device, code: &[u8]) -> VkResult<vk::ShaderModule> {
@@ -1432,32 +1285,6 @@ fn get_memory_type_index(
         type_bits >>= 1;
     }
     0
-}
-
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "system" fn default_vulkan_debug_utils_callback(
-    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
-    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
-    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-    _p_user_data: *mut c_void,
-) -> vk::Bool32 {
-    let severity = match message_severity {
-        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => "[Verbose]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => "[Warning]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => "[Error]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => "[Info]",
-        _ => "[Unknown]",
-    };
-    let types = match message_type {
-        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "[General]",
-        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "[Performance]",
-        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "[Validation]",
-        _ => "[Unknown]",
-    };
-    let message = CStr::from_ptr((*p_callback_data).p_message);
-    println!("[Debug]{}{}{:?}", severity, types, message);
-
-    vk::FALSE
 }
 
 #[derive(Clone)]
