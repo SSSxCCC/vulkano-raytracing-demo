@@ -1,6 +1,6 @@
-use std::{fs::File, io::Write, ptr::{self, null}};
+use std::{ptr, sync::Arc};
 use ash::{prelude::VkResult, util::Align, vk::{self, Packed24_8}};
-use vulkano::VulkanObject;
+use vulkano::{image::{ImageUsage, ImageViewAbstract}, VulkanObject};
 use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
 use winit::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop, EventLoopBuilder}};
 
@@ -38,14 +38,16 @@ fn _main(event_loop: EventLoop<()>) {
     config.device_features.acceleration_structure = true;
     config.device_features.ray_tracing_pipeline = true;
     let context = VulkanoContext::new(config);
-    draw_image(&context);
     let mut windows = VulkanoWindows::default();
 
     event_loop.run(move |event, event_loop, control_flow| match event {
         Event::Resumed => {
             log::debug!("Event::Resumed");
             windows.create_window(&event_loop, &context,
-                &WindowDescriptor::default(), |_|{});
+                &WindowDescriptor::default(), |info| {
+                    //info.image_format = Some(Format::R8G8B8A8_UNORM);
+                    info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
+                });
         }
         Event::Suspended => {
             log::debug!("Event::Suspended");
@@ -69,7 +71,7 @@ fn _main(event_loop: EventLoop<()>) {
         Event::RedrawRequested(_) => {
             if let Some(renderer) = windows.get_primary_renderer_mut() {
                 let gpu_future = renderer.acquire().unwrap();
-
+                draw_image(&context, renderer.swapchain_image_view()); // TODO: use GpuFuture
                 renderer.present(gpu_future, true);
             }
         }
@@ -80,15 +82,11 @@ fn _main(event_loop: EventLoop<()>) {
     });
 }
 
-fn draw_image(context: &VulkanoContext) {
+fn draw_image(context: &VulkanoContext, image_view: Arc<dyn ImageViewAbstract>) {
     let entry = unsafe { ash::Entry::load() }.unwrap();
     let instance = unsafe { ash::Instance::load(entry.static_fn(), context.instance().handle()) };
     let device = unsafe { ash::Device::load(instance.fp_v1_0(), context.device().handle()) };
     let queue_family_index = context.graphics_queue().queue_family_index();
-
-    const WIDTH: u32 = 800;
-    const HEIGHT: u32 = 600;
-    const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
     let mut rt_pipeline_properties = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
     {
@@ -119,133 +117,6 @@ fn draw_image(context: &VulkanoContext) {
 
     let device_memory_properties =
         unsafe { instance.get_physical_device_memory_properties(context.device().physical_device().handle()) };
-
-    let image = {
-        let image_create_info = vk::ImageCreateInfo::builder()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(COLOR_FORMAT)
-            .extent(
-                vk::Extent3D::builder()
-                    .width(WIDTH)
-                    .height(HEIGHT)
-                    .depth(1)
-                    .build(),
-            )
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(
-                vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_SRC,
-            )
-            .build();
-
-        unsafe { device.create_image(&image_create_info, None) }.unwrap()
-    };
-
-    let device_memory = {
-        let mem_reqs = unsafe { device.get_image_memory_requirements(image) };
-        let mem_alloc_info = vk::MemoryAllocateInfo::builder()
-            .allocation_size(mem_reqs.size)
-            .memory_type_index(get_memory_type_index(
-                device_memory_properties,
-                mem_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            ));
-
-        unsafe { device.allocate_memory(&mem_alloc_info, None) }.unwrap()
-    };
-
-    unsafe { device.bind_image_memory(image, device_memory, 0) }.unwrap();
-
-    let image_view = {
-        let image_view_create_info = vk::ImageViewCreateInfo::builder()
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(COLOR_FORMAT)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
-            .image(image)
-            .build();
-
-        unsafe { device.create_image_view(&image_view_create_info, None) }.unwrap()
-    };
-
-    {
-        let command_buffer = {
-            let allocate_info = vk::CommandBufferAllocateInfo::builder()
-                .command_buffer_count(1)
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .build();
-
-            let command_buffers =
-                unsafe { device.allocate_command_buffers(&allocate_info) }.unwrap();
-            command_buffers[0]
-        };
-
-        unsafe {
-            device.begin_command_buffer(
-                command_buffer,
-                &vk::CommandBufferBeginInfo::builder()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-                    .build(),
-            )
-        }
-        .unwrap();
-
-        let image_barrier = vk::ImageMemoryBarrier::builder()
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::empty())
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::GENERAL)
-            .image(image)
-            .subresource_range(
-                vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1)
-                    .build(),
-            )
-            .build();
-
-        unsafe {
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[image_barrier],
-            );
-
-            device.end_command_buffer(command_buffer).unwrap();
-        }
-
-        let command_buffers = [command_buffer];
-
-        let submit_infos = [vk::SubmitInfo::builder()
-            .command_buffers(&command_buffers)
-            .build()];
-
-        unsafe {
-            device
-                .queue_submit(graphics_queue, &submit_infos, vk::Fence::null())
-                .expect("Failed to execute queue submit.");
-
-            device.queue_wait_idle(graphics_queue).unwrap();
-            device.free_command_buffers(command_pool, &[command_buffer]);
-        }
-    }
 
     // acceleration structures
 
@@ -901,7 +772,7 @@ fn draw_image(context: &VulkanoContext) {
 
     let image_info = [vk::DescriptorImageInfo::builder()
         .image_layout(vk::ImageLayout::GENERAL)
-        .image_view(image_view)
+        .image_view(image_view.handle())
         .build()];
 
     let image_write = vk::WriteDescriptorSet::builder()
@@ -977,8 +848,8 @@ fn draw_image(context: &VulkanoContext) {
                 &sbt_miss_region,
                 &sbt_hit_region,
                 &sbt_call_region,
-                WIDTH,
-                HEIGHT,
+                image_view.image().dimensions().width(),
+                image_view.image().dimensions().height(),
                 1,
             );
             device.end_command_buffer(command_buffer).unwrap();
@@ -997,227 +868,6 @@ fn draw_image(context: &VulkanoContext) {
 
             device.queue_wait_idle(graphics_queue).unwrap();
         }
-    }
-
-    // transfer to host
-
-    let dst_image = {
-        let dst_image_create_info = vk::ImageCreateInfo::builder()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(COLOR_FORMAT)
-            .extent(
-                vk::Extent3D::builder()
-                    .width(WIDTH)
-                    .height(HEIGHT)
-                    .depth(1)
-                    .build(),
-            )
-            .mip_levels(1)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::LINEAR)
-            .usage(vk::ImageUsageFlags::TRANSFER_DST)
-            .build();
-
-        unsafe { device.create_image(&dst_image_create_info, None) }.unwrap()
-    };
-
-    let dst_device_memory = {
-        let dst_mem_reqs = unsafe { device.get_image_memory_requirements(dst_image) };
-        let dst_mem_alloc_info = vk::MemoryAllocateInfo::builder()
-            .allocation_size(dst_mem_reqs.size)
-            .memory_type_index(get_memory_type_index(
-                device_memory_properties,
-                dst_mem_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            ));
-
-        unsafe { device.allocate_memory(&dst_mem_alloc_info, None) }.unwrap()
-    };
-    unsafe { device.bind_image_memory(dst_image, dst_device_memory, 0) }.unwrap();
-
-    let copy_cmd = {
-        let allocate_info = vk::CommandBufferAllocateInfo::builder()
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1)
-            .build();
-
-        unsafe { device.allocate_command_buffers(&allocate_info) }.unwrap()[0]
-    };
-
-    {
-        let cmd_begin_info = vk::CommandBufferBeginInfo::builder().build();
-
-        unsafe { device.begin_command_buffer(copy_cmd, &cmd_begin_info) }.unwrap();
-    }
-
-    {
-        let image_barrier = vk::ImageMemoryBarrier::builder()
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .image(dst_image)
-            .subresource_range(
-                vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1)
-                    .build(),
-            )
-            .build();
-
-        unsafe {
-            device.cmd_pipeline_barrier(
-                copy_cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[image_barrier],
-            );
-        }
-    }
-
-    {
-        let copy_region = vk::ImageCopy::builder()
-            .src_subresource(
-                vk::ImageSubresourceLayers::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .layer_count(1)
-                    .build(),
-            )
-            .dst_subresource(
-                vk::ImageSubresourceLayers::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .layer_count(1)
-                    .build(),
-            )
-            .extent(
-                vk::Extent3D::builder()
-                    .width(WIDTH)
-                    .height(HEIGHT)
-                    .depth(1)
-                    .build(),
-            )
-            .build();
-
-        unsafe {
-            device.cmd_copy_image(
-                copy_cmd,
-                image,
-                vk::ImageLayout::GENERAL,
-                dst_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[copy_region],
-            );
-        }
-    }
-
-    {
-        let image_barrier = vk::ImageMemoryBarrier::builder()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::MEMORY_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::GENERAL)
-            .image(dst_image)
-            .subresource_range(
-                vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1)
-                    .build(),
-            )
-            .build();
-
-        unsafe {
-            device.cmd_pipeline_barrier(
-                copy_cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[image_barrier],
-            );
-        }
-    }
-
-    {
-        let submit_infos = [vk::SubmitInfo {
-            s_type: vk::StructureType::SUBMIT_INFO,
-            p_next: ptr::null(),
-            wait_semaphore_count: 0,
-            p_wait_semaphores: null(),
-            p_wait_dst_stage_mask: null(),
-            command_buffer_count: 1,
-            p_command_buffers: &copy_cmd,
-            signal_semaphore_count: 0,
-            p_signal_semaphores: null(),
-        }];
-
-        unsafe {
-            device.end_command_buffer(copy_cmd).unwrap();
-
-            device
-                .queue_submit(graphics_queue, &submit_infos, vk::Fence::null())
-                .expect("Failed to execute queue submit.");
-
-            device.queue_wait_idle(graphics_queue).unwrap();
-        }
-    }
-
-    let subresource_layout = {
-        let subresource = vk::ImageSubresource::builder()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .build();
-
-        unsafe { device.get_image_subresource_layout(dst_image, subresource) }
-    };
-
-    let data: *const u8 = unsafe {
-        device
-            .map_memory(
-                dst_device_memory,
-                0,
-                vk::WHOLE_SIZE,
-                vk::MemoryMapFlags::empty(),
-            )
-            .unwrap() as _
-    };
-
-    let mut data = unsafe { data.offset(subresource_layout.offset as isize) };
-
-    let mut png_encoder = png::Encoder::new(File::create("out.png").unwrap(), WIDTH, HEIGHT);
-
-    png_encoder.set_depth(png::BitDepth::Eight);
-    png_encoder.set_color(png::ColorType::Rgba);
-
-    let mut png_writer = png_encoder
-        .write_header()
-        .unwrap()
-        .into_stream_writer_with_size((4 * WIDTH) as usize)
-        .unwrap();
-
-    for _ in 0..HEIGHT {
-        let row = unsafe { std::slice::from_raw_parts(data, 4 * WIDTH as usize) };
-        png_writer.write_all(row).unwrap();
-        data = unsafe { data.offset(subresource_layout.row_pitch as isize) };
-    }
-
-    png_writer.finish().unwrap();
-
-    unsafe {
-        device.unmap_memory(dst_device_memory);
-        device.free_memory(dst_device_memory, None);
-        device.destroy_image(dst_image, None);
     }
 
     // clean up
@@ -1244,10 +894,6 @@ fn draw_image(context: &VulkanoContext) {
 
         acceleration_structure.destroy_acceleration_structure(top_as, None);
         top_as_buffer.destroy(&device);
-
-        device.destroy_image_view(image_view, None);
-        device.destroy_image(image, None);
-        device.free_memory(device_memory, None);
     }
 
     unsafe {
