@@ -1,5 +1,5 @@
 [package]
-name = "minimal"
+name = "weekend"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,6 +12,10 @@ vulkano-util = "0.33.0"
 log = "0.4"
 winit = { version = "0.28.6", features = [ "android-game-activity" ] }
 ash = "0.37.2"
+bytemuck = "1.7.2"
+rand = "0.8.4"
+glam = "0.24.2"
+weekend-shader = { path = "../weekend-shader" }
 
 [build-dependencies]
 spirv-builder = "0.9"
@@ -31,6 +35,6 @@ name = "main"
 crate_type = ["cdylib"]
 
 [[bin]]
-name = "minimal"
+name = "weekend"
 path="src/lib.rs"
 required-features = [ "desktop" ]

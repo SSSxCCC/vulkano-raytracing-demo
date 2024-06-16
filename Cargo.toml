@@ -1,5 +1,7 @@
 [workspace]
 members = [
 	"minimal",
-	"minimal-shader"
+	"minimal-shader",
+	"weekend",
+	"weekend-shader",
 ]

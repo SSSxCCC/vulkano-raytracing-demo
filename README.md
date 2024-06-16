@@ -18,3 +18,13 @@ cd android-project
 ./gradlew build
 ./gradlew installDebug
 ```
+
+## Demos
+
+### minimal
+
+![image](minimal.png)
+
+### weekend
+
+![image](weekend.png)
