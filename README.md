@@ -2,13 +2,15 @@
 
 An example of KHR raytracing using [vulkano](https://github.com/vulkano-rs/vulkano) and [rust-gpu](https://github.com/EmbarkStudios/rust-gpu).
 
-## Run desktop client
+## Run
+
+### Windows
 
 ```
 cargo run -p minimal -F desktop
 ```
 
-## Build android app
+### Android
 
 ```
 rustup target add aarch64-linux-android
