@@ -118,7 +118,7 @@ pub fn main_ray_generation(
     #[spirv(launch_size)] launch_size: UVec3,
     #[spirv(push_constant)] constants: &PushConstants,
     #[spirv(descriptor_set = 0, binding = 0)] top_level_as: &AccelerationStructure,
-    #[spirv(descriptor_set = 0, binding = 1)] image: &Image!(2D, format=rgba32f, sampled=false),
+    #[spirv(descriptor_set = 0, binding = 1)] image: &Image!(2D, format=rgba8, sampled=false),
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] materials: &[EnumMaterial],
     #[spirv(ray_payload)] payload: &mut RayPayload,
 ) {
@@ -188,7 +188,7 @@ pub fn main_ray_generation(
         final_color += color;
     }
 
-    final_color /= N_SAMPLES as f32;
+    final_color = (final_color / N_SAMPLES as f32).powf(0.5);
 
     let pos = uvec2(launch_id.x, launch_size.y - 1 - launch_id.y);
 
