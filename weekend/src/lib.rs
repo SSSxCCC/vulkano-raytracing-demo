@@ -3,7 +3,7 @@ use ash::{prelude::VkResult, util::Align, vk::{self, Packed24_8}};
 use weekend_shader::pod::EnumMaterialPod;
 use glam::vec3;
 use rand::prelude::*;
-use vulkano::{image::{ImageUsage, ImageViewAbstract}, VulkanObject};
+use vulkano::{image::{view::ImageView, ImageUsage}, VulkanObject};
 use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
 use winit::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop, EventLoopBuilder}};
 
@@ -85,7 +85,7 @@ fn _main(event_loop: EventLoop<()>) {
     });
 }
 
-fn draw_image(context: &VulkanoContext, image_view: Arc<dyn ImageViewAbstract>) {
+fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
     let entry = unsafe { ash::Entry::load() }.unwrap();
     let instance = unsafe { ash::Instance::load(entry.static_fn(), context.instance().handle()) };
     let device = unsafe { ash::Device::load(instance.fp_v1_0(), context.device().handle()) };
@@ -820,8 +820,8 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<dyn ImageViewAbstract>) 
                 &sbt_miss_region,
                 &sbt_hit_region,
                 &sbt_call_region,
-                image_view.image().dimensions().width(),
-                image_view.image().dimensions().height(),
+                image_view.image().extent()[0],
+                image_view.image().extent()[1],
                 1,
             );
         }
