@@ -6,4 +6,5 @@ members = [
 	"weekend-shader",
 	"shapes",
 	"shapes-shader",
+	"ray-query",
 ]
