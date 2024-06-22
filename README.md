@@ -27,6 +27,10 @@ cd android-project
 
 ![image](minimal.png)
 
+### shapes
+
+![image](shapes.png)
+
 ### weekend
 
 ![image](weekend.png)

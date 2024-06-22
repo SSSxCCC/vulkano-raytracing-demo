@@ -4,4 +4,6 @@ members = [
 	"minimal-shader",
 	"weekend",
 	"weekend-shader",
+	"shapes",
+	"shapes-shader",
 ]

@@ -331,7 +331,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330c60081dcc4c72131f8eb70510f1ac07223e5d4163db481a04a0befcffa412"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.3",
 ]
 
 [[package]]
@@ -1205,6 +1205,28 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "shapes"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "ash",
+ "bytemuck",
+ "env_logger",
+ "log",
+ "spirv-builder",
+ "vulkano",
+ "vulkano-util",
+ "winit",
+]
+
+[[package]]
+name = "shapes-shader"
+version = "0.1.0"
+dependencies = [
+ "spirv-std",
 ]
 
 [[package]]
