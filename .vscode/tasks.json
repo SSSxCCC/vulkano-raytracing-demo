@@ -3,9 +3,8 @@
     "tasks": [
         {
             "label": "cargo build",
-            "type": "cargo",
-			"command": "build",
-			"args": ["-p", "minimal", "-F", "desktop"],
+            "command": "cargo",
+            "args": ["build", "-p", "minimal", "-F", "desktop"],
         },
     ]
 }
