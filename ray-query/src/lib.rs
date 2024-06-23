@@ -1,12 +1,7 @@
 use std::sync::Arc;
-use vulkano::acceleration_structure::{
-    AccelerationStructureBuildSizesInfo, AccelerationStructureBuildType,
-};
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocatorCreateInfo;
-use vulkano::pipeline::graphics::color_blend::ColorBlendAttachmentState;
-use vulkano::pipeline::DynamicState;
 use vulkano::{
     acceleration_structure::{
+        AccelerationStructureBuildSizesInfo, AccelerationStructureBuildType,
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
         AccelerationStructureBuildRangeInfo, AccelerationStructureCreateInfo,
         AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData,
@@ -20,20 +15,16 @@ use vulkano::{
         PrimaryCommandBufferAbstract, RenderingAttachmentInfo, RenderingInfo,
     },
     descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+        allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
+        PersistentDescriptorSet, WriteDescriptorSet,
     },
-    device::{
-        physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, Features, Queue,
-        QueueCreateInfo, QueueFlags,
-    },
-    image::{view::ImageView, Image, ImageUsage},
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+    image::{view::ImageView, ImageUsage},
     memory::allocator::{
-        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
+        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter,
     },
     pipeline::{
         graphics::{
-            color_blend::ColorBlendState,
+            color_blend::{ColorBlendState, ColorBlendAttachmentState},
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
             rasterization::RasterizationState,
@@ -44,167 +35,124 @@ use vulkano::{
         },
         layout::PipelineDescriptorSetLayoutCreateInfo,
         GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
-        PipelineShaderStageCreateInfo,
+        PipelineShaderStageCreateInfo, DynamicState,
     },
+    device::Queue,
     render_pass::AttachmentStoreOp,
-    swapchain::{
-        acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
-    },
-    sync::{self, GpuFuture},
-    DeviceSize, Packed24_8, Validated, Version, VulkanError, VulkanLibrary,
+    sync::GpuFuture,
+    DeviceSize, Packed24_8,
 };
+use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
+    event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
 };
 
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct MyVertex {
+    #[format(R32G32_SFLOAT)]
+    position: [f32; 2],
+}
+
+#[cfg(target_os = "android")]
+use winit::platform::android::activity::AndroidApp;
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+fn android_main(app: AndroidApp) {
+    android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Trace));
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+    let event_loop = EventLoopBuilder::new().with_android_app(app).build();
+    _main(event_loop);
+}
+
+#[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
 fn main() {
-    let event_loop = EventLoop::new();
+    env_logger::builder().filter_level(log::LevelFilter::Trace).parse_default_env().init();
+    let event_loop = EventLoopBuilder::new().build();
+    _main(event_loop);
+}
 
-    let library = VulkanLibrary::new().unwrap();
-    let required_extensions = Surface::required_extensions(&event_loop);
-    let instance = Instance::new(
-        library,
-        InstanceCreateInfo {
-            flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
-            enabled_extensions: required_extensions,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+fn _main(event_loop: EventLoop<()>) {
+    let mut config = VulkanoConfig::default();
+    config.device_extensions.khr_deferred_host_operations = true;
+    config.device_extensions.khr_acceleration_structure = true;
+    config.device_extensions.khr_ray_query = true;
+    config.device_features.acceleration_structure = true;
+    config.device_features.ray_query = true;
+    config.device_features.dynamic_rendering = true;
+    config.device_features.buffer_device_address = true;
+    let context = VulkanoContext::new(config);
+    let mut windows = VulkanoWindows::default();
 
-    let window = Arc::new(WindowBuilder::new().build(&event_loop).unwrap());
-    let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
+    event_loop.run(move |event, event_loop, control_flow| match event {
+        Event::Resumed => {
+            log::debug!("Event::Resumed");
+            windows.create_window(&event_loop, &context,
+                &WindowDescriptor::default(), |info| {
+                    //info.image_format = Some(Format::R8G8B8A8_UNORM);
+                    info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
+                });
+        }
+        Event::Suspended => {
+            log::debug!("Event::Suspended");
+            windows.remove_renderer(windows.primary_window_id().unwrap());
+        }
+        Event::WindowEvent { event , .. } => match event {
+            WindowEvent::CloseRequested => {
+                log::debug!("WindowEvent::CloseRequested");
+                *control_flow = ControlFlow::Exit;
+            }
+            WindowEvent::Resized(_) => {
+                log::debug!("WindowEvent::Resized");
+                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                log::debug!("WindowEvent::ScaleFactorChanged");
+                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+            }
+            _ => ()
+        }
+        Event::RedrawRequested(_) => {
+            if let Some(renderer) = windows.get_primary_renderer_mut() {
+                let gpu_future = renderer.acquire().unwrap();
+                let gpu_future = draw_image(&context, renderer.swapchain_image_view(), gpu_future); // TODO: use GpuFuture
+                renderer.present(gpu_future, true);
+            }
+        }
+        Event::MainEventsCleared => {
+            if let Some(renderer) = windows.get_primary_renderer() { renderer.window().request_redraw() }
+        }
+        _ => (),
+    });
+}
 
-    let mut device_extensions = DeviceExtensions {
-        khr_acceleration_structure: true,
-        khr_ray_query: true,
-        khr_swapchain: true,
-        ..DeviceExtensions::empty()
-    };
-    let features = Features {
-        acceleration_structure: true,
-        buffer_device_address: true,
-        dynamic_rendering: true,
-        ray_query: true,
-        ..Features::empty()
-    };
-    let (physical_device, queue_family_index) = instance
-        .enumerate_physical_devices()
-        .unwrap()
-        .filter(|p| {
-            p.api_version() >= Version::V1_3 || p.supported_extensions().khr_dynamic_rendering
-        })
-        .filter(|p| p.supported_extensions().contains(&device_extensions))
-        .filter_map(|p| {
-            p.queue_family_properties()
-                .iter()
-                .enumerate()
-                .position(|(i, q)| {
-                    q.queue_flags.intersects(QueueFlags::GRAPHICS)
-                        && p.surface_support(i as u32, &surface).unwrap_or(false)
-                })
-                .map(|i| (p, i as u32))
-        })
-        .min_by_key(|(p, _)| match p.properties().device_type {
-            PhysicalDeviceType::DiscreteGpu => 0,
-            PhysicalDeviceType::IntegratedGpu => 1,
-            PhysicalDeviceType::VirtualGpu => 2,
-            PhysicalDeviceType::Cpu => 3,
-            PhysicalDeviceType::Other => 4,
-            _ => 5,
-        })
-        .expect("no suitable physical device found");
-
-    println!(
-        "Using device: {} (type: {:?})",
-        physical_device.properties().device_name,
-        physical_device.properties().device_type,
-    );
-
-    if physical_device.api_version() < Version::V1_3 {
-        device_extensions.khr_dynamic_rendering = true;
-    }
-
-    let (device, mut queues) = Device::new(
-        physical_device,
-        DeviceCreateInfo {
-            queue_create_infos: vec![QueueCreateInfo {
-                queue_family_index,
-                ..Default::default()
-            }],
-            enabled_extensions: device_extensions,
-            enabled_features: features,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let queue = queues.next().unwrap();
-
-    let (mut swapchain, images) = {
-        let surface_capabilities = device
-            .physical_device()
-            .surface_capabilities(&surface, Default::default())
-            .unwrap();
-        let image_format = device
-            .physical_device()
-            .surface_formats(&surface, Default::default())
-            .unwrap()[0]
-            .0;
-
-        Swapchain::new(
-            device.clone(),
-            surface,
-            SwapchainCreateInfo {
-                min_image_count: surface_capabilities.min_image_count.max(2),
-                image_format,
-                image_extent: window.inner_size().into(),
-                image_usage: ImageUsage::COLOR_ATTACHMENT,
-                composite_alpha: surface_capabilities
-                    .supported_composite_alpha
-                    .into_iter()
-                    .next()
-                    .unwrap(),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-    };
-
-    let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-
-    #[derive(BufferContents, Vertex)]
-    #[repr(C)]
-    struct Vertex {
-        #[format(R32G32_SFLOAT)]
-        position: [f32; 2],
-    }
-
+fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: Box<dyn GpuFuture>) -> Box<dyn GpuFuture> {
     // The quad buffer that covers the entire surface
     let quad = [
-        Vertex {
+        MyVertex {
             position: [-1.0, -1.0],
         },
-        Vertex {
+        MyVertex {
             position: [-1.0, 1.0],
         },
-        Vertex {
+        MyVertex {
             position: [1.0, -1.0],
         },
-        Vertex {
+        MyVertex {
             position: [1.0, 1.0],
         },
-        Vertex {
+        MyVertex {
             position: [1.0, -1.0],
         },
-        Vertex {
+        MyVertex {
             position: [-1.0, 1.0],
         },
     ];
     let quad_buffer = Buffer::from_iter(
-        memory_allocator.clone(),
+        context.memory_allocator().clone(),
         BufferCreateInfo {
             usage: BufferUsage::VERTEX_BUFFER,
             ..Default::default()
@@ -219,15 +167,15 @@ fn main() {
     .unwrap();
 
     let pipeline = {
-        let vs = vs::load(device.clone())
+        let vs = vs::load(context.device().clone())
             .unwrap()
             .entry_point("main")
             .unwrap();
-        let fs = fs::load(device.clone())
+        let fs = fs::load(context.device().clone())
             .unwrap()
             .entry_point("main")
             .unwrap();
-        let vertex_input_state = Vertex::per_vertex()
+        let vertex_input_state = MyVertex::per_vertex()
             .definition(&vs.info().input_interface)
             .unwrap();
         let stages = [
@@ -235,19 +183,19 @@ fn main() {
             PipelineShaderStageCreateInfo::new(fs),
         ];
         let layout = PipelineLayout::new(
-            device.clone(),
+            context.device().clone(),
             PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())
+                .into_pipeline_layout_create_info(context.device().clone())
                 .unwrap(),
         )
         .unwrap();
 
         let subpass = PipelineRenderingCreateInfo {
-            color_attachment_formats: vec![Some(swapchain.image_format())],
+            color_attachment_formats: vec![Some(image_view.format())],
             ..Default::default()
         };
         GraphicsPipeline::new(
-            device.clone(),
+            context.device().clone(),
             None,
             GraphicsPipelineCreateInfo {
                 stages: stages.into_iter().collect(),
@@ -267,17 +215,17 @@ fn main() {
         .unwrap()
     };
 
-    let mut viewport = Viewport {
+    let image_extent = image_view.image().extent();
+    let viewport = Viewport {
         offset: [0.0, 0.0],
-        extent: [0.0, 0.0],
+        extent: [image_extent[0] as f32, image_extent[1] as f32],
         depth_range: 0.0..=1.0,
     };
 
-    let mut attachment_image_views = window_size_dependent_setup(&images, &mut viewport);
     let command_buffer_allocator =
-        StandardCommandBufferAllocator::new(device.clone(), Default::default());
+        StandardCommandBufferAllocator::new(context.device().clone(), Default::default());
 
-    let (top_level_acceleration_structure, bottom_level_acceleration_structure) = {
+    let (top_level_acceleration_structure, _bottom_level_acceleration_structure) = {
         #[derive(BufferContents, Vertex)]
         #[repr(C)]
         struct Vertex {
@@ -298,7 +246,7 @@ fn main() {
         ];
 
         let vertex_buffer = Buffer::from_iter(
-            memory_allocator.clone(),
+            context.memory_allocator().clone(),
             BufferCreateInfo {
                 usage: BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY
                     | BufferUsage::SHADER_DEVICE_ADDRESS,
@@ -314,15 +262,15 @@ fn main() {
         .unwrap();
 
         let bottom_level_acceleration_structure = create_bottom_level_acceleration_structure(
-            memory_allocator.clone(),
+            context.memory_allocator().clone(),
             &command_buffer_allocator,
-            queue.clone(),
+            context.graphics_queue().clone(),
             &[&vertex_buffer],
         );
         let top_level_acceleration_structure = create_top_level_acceleration_structure(
-            memory_allocator.clone(),
+            context.memory_allocator().clone(),
             &command_buffer_allocator,
-            queue.clone(),
+            context.graphics_queue().clone(),
             &[&bottom_level_acceleration_structure],
         );
 
@@ -332,7 +280,7 @@ fn main() {
         )
     };
 
-    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone(), StandardDescriptorSetAllocatorCreateInfo::default());
+    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(context.device().clone(), StandardDescriptorSetAllocatorCreateInfo::default());
 
     let descriptor_set = PersistentDescriptorSet::new(
         &descriptor_set_allocator,
@@ -345,136 +293,45 @@ fn main() {
     )
     .unwrap();
 
-    let mut recreate_swapchain = false;
-    let mut previous_frame_end = Some(sync::now(device.clone()).boxed());
-
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } => {
-            *control_flow = ControlFlow::Exit;
-        }
-        Event::WindowEvent {
-            event: WindowEvent::Resized(_),
-            ..
-        } => {
-            recreate_swapchain = true;
-        }
-        Event::RedrawEventsCleared => {
-            let image_extent: [u32; 2] = window.inner_size().into();
-
-            if image_extent.contains(&0) {
-                return;
-            }
-
-            previous_frame_end.as_mut().unwrap().cleanup_finished();
-
-            if recreate_swapchain {
-                let (new_swapchain, new_images) = swapchain
-                    .recreate(SwapchainCreateInfo {
-                        image_extent,
-                        ..swapchain.create_info()
-                    })
-                    .expect("failed to recreate swapchain");
-
-                swapchain = new_swapchain;
-                attachment_image_views = window_size_dependent_setup(&new_images, &mut viewport);
-                recreate_swapchain = false;
-            }
-
-            let (image_index, suboptimal, acquire_future) =
-                match acquire_next_image(swapchain.clone(), None).map_err(Validated::unwrap) {
-                    Ok(r) => r,
-                    Err(VulkanError::OutOfDate) => {
-                        recreate_swapchain = true;
-                        return;
-                    }
-                    Err(e) => panic!("failed to acquire next image: {e}"),
-                };
-
-            if suboptimal {
-                recreate_swapchain = true;
-            }
-
-            let mut builder = AutoCommandBufferBuilder::primary(
-                &command_buffer_allocator,
-                queue.queue_family_index(),
-                CommandBufferUsage::OneTimeSubmit,
-            )
-            .unwrap();
-            builder
-                .begin_rendering(RenderingInfo {
-                    color_attachments: vec![Some(RenderingAttachmentInfo {
-                        store_op: AttachmentStoreOp::Store,
-                        ..RenderingAttachmentInfo::image_view(
-                            attachment_image_views[image_index as usize].clone(),
-                        )
-                    })],
-                    ..Default::default()
-                })
-                .unwrap()
-                .set_viewport(0, [viewport.clone()].into_iter().collect())
-                .unwrap()
-                .bind_pipeline_graphics(pipeline.clone())
-                .unwrap()
-                .bind_vertex_buffers(0, quad_buffer.clone())
-                .unwrap()
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Graphics,
-                    pipeline.layout().clone(),
-                    0,
-                    descriptor_set.clone(),
+    let mut builder = AutoCommandBufferBuilder::primary(
+        &command_buffer_allocator,
+        context.graphics_queue().queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+    builder
+        .begin_rendering(RenderingInfo {
+            color_attachments: vec![Some(RenderingAttachmentInfo {
+                store_op: AttachmentStoreOp::Store,
+                ..RenderingAttachmentInfo::image_view(
+                    image_view.clone(),
                 )
-                .unwrap()
-                .draw(quad_buffer.len() as u32, 1, 0, 0)
-                .unwrap()
-                .end_rendering()
-                .unwrap();
-            let command_buffer = builder.build().unwrap();
-
-            let future = previous_frame_end
-                .take()
-                .unwrap()
-                .join(acquire_future)
-                .then_execute(queue.clone(), command_buffer)
-                .unwrap()
-                .then_swapchain_present(
-                    queue.clone(),
-                    SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_index),
-                )
-                .then_signal_fence_and_flush();
-
-            match future.map_err(Validated::unwrap) {
-                Ok(future) => {
-                    previous_frame_end = Some(future.boxed());
-                }
-                Err(VulkanError::OutOfDate) => {
-                    recreate_swapchain = true;
-                    previous_frame_end = Some(sync::now(device.clone()).boxed());
-                }
-                Err(e) => {
-                    println!("failed to flush future: {e}");
-                    previous_frame_end = Some(sync::now(device.clone()).boxed());
-                }
-            }
-        }
-        _ => (),
-    });
-}
-
-/// This function is called once during initialization, then again whenever the window is resized.
-fn window_size_dependent_setup(
-    images: &[Arc<Image>],
-    viewport: &mut Viewport,
-) -> Vec<Arc<ImageView>> {
-    let extent = images[0].extent();
-    viewport.extent = [extent[0] as f32, extent[1] as f32];
-
-    images
-        .iter()
-        .map(|image| ImageView::new_default(image.clone()).unwrap())
-        .collect::<Vec<_>>()
+            })],
+            ..Default::default()
+        })
+        .unwrap()
+        .set_viewport(0, [viewport.clone()].into_iter().collect())
+        .unwrap()
+        .bind_pipeline_graphics(pipeline.clone())
+        .unwrap()
+        .bind_vertex_buffers(0, quad_buffer.clone())
+        .unwrap()
+        .bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            pipeline.layout().clone(),
+            0,
+            descriptor_set.clone(),
+        )
+        .unwrap()
+        .draw(quad_buffer.len() as u32, 1, 0, 0)
+        .unwrap()
+        .end_rendering()
+        .unwrap();
+    let command_buffer = builder.build().unwrap();
+    command_buffer
+        .execute_after(gpu_future, context.graphics_queue().clone())
+        .unwrap()
+        .boxed()
 }
 
 fn create_top_level_acceleration_structure(
@@ -601,56 +458,6 @@ fn create_bottom_level_acceleration_structure<T: BufferContents + Vertex>(
     )
 }
 
-fn create_acceleration_structure(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    ty: AccelerationStructureType,
-    size: DeviceSize,
-) -> Arc<AccelerationStructure> {
-    let buffer = Buffer::new_slice::<u8>(
-        memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-            ..Default::default()
-        },
-        size,
-    )
-    .unwrap();
-
-    unsafe {
-        AccelerationStructure::new(
-            memory_allocator.device().clone(),
-            AccelerationStructureCreateInfo {
-                ty,
-                ..AccelerationStructureCreateInfo::new(buffer)
-            },
-        )
-        .unwrap()
-    }
-}
-
-fn create_scratch_buffer(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    size: DeviceSize,
-) -> Subbuffer<[u8]> {
-    Buffer::new_slice::<u8>(
-        memory_allocator,
-        BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER | BufferUsage::SHADER_DEVICE_ADDRESS,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-            ..Default::default()
-        },
-        size,
-    )
-    .unwrap()
-}
-
 fn build_acceleration_structure(
     memory_allocator: Arc<dyn MemoryAllocator>,
     command_buffer_allocator: &StandardCommandBufferAllocator,
@@ -704,6 +511,56 @@ fn build_acceleration_structure(
         .unwrap();
 
     acceleration_structure
+}
+
+fn create_acceleration_structure(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    ty: AccelerationStructureType,
+    size: DeviceSize,
+) -> Arc<AccelerationStructure> {
+    let buffer = Buffer::new_slice::<u8>(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+        size,
+    )
+    .unwrap();
+
+    unsafe {
+        AccelerationStructure::new(
+            memory_allocator.device().clone(),
+            AccelerationStructureCreateInfo {
+                ty,
+                ..AccelerationStructureCreateInfo::new(buffer)
+            },
+        )
+        .unwrap()
+    }
+}
+
+fn create_scratch_buffer(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    size: DeviceSize,
+) -> Subbuffer<[u8]> {
+    Buffer::new_slice::<u8>(
+        memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER | BufferUsage::SHADER_DEVICE_ADDRESS,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+        size,
+    )
+    .unwrap()
 }
 
 mod vs {
