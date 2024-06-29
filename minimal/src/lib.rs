@@ -1,14 +1,8 @@
 use std::{ptr, sync::Arc};
-use ash::{prelude::VkResult, util::Align, vk::{self, Packed24_8}};
-use vulkano::{image::{view::ImageView, ImageUsage}, VulkanObject};
+use ash::{prelude::VkResult, util::Align, vk};
+use vulkano::{acceleration_structure::{AccelerationStructure, AccelerationStructureBuildGeometryInfo, AccelerationStructureBuildRangeInfo, AccelerationStructureBuildSizesInfo, AccelerationStructureBuildType, AccelerationStructureCreateInfo, AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData, AccelerationStructureGeometryInstancesDataType, AccelerationStructureGeometryTrianglesData, AccelerationStructureInstance, AccelerationStructureType, BuildAccelerationStructureFlags, BuildAccelerationStructureMode, GeometryFlags, GeometryInstanceFlags}, buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer}, command_buffer::{allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage, PrimaryCommandBufferAbstract}, device::Queue, image::{view::ImageView, ImageUsage}, memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter}, pipeline::graphics::vertex_input::Vertex, sync::GpuFuture, DeviceSize, Packed24_8, VulkanObject};
 use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
 use winit::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop, EventLoopBuilder}};
-
-#[repr(C)]
-#[derive(Clone, Debug, Copy)]
-struct Vertex {
-    pos: [f32; 3],
-}
 
 #[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
@@ -37,6 +31,7 @@ fn _main(event_loop: EventLoop<()>) {
     config.device_extensions.khr_ray_tracing_pipeline = true;
     config.device_features.acceleration_structure = true;
     config.device_features.ray_tracing_pipeline = true;
+    config.device_features.buffer_device_address = true;
     let context = VulkanoContext::new(config);
     let mut windows = VulkanoWindows::default();
 
@@ -99,9 +94,6 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
         }
     }
 
-    let acceleration_structure =
-        ash::extensions::khr::AccelerationStructure::new(&instance, &device);
-
     let rt_pipeline = ash::extensions::khr::RayTracingPipeline::new(&instance, &device);
 
     let graphics_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -118,397 +110,61 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
     let device_memory_properties =
         unsafe { instance.get_physical_device_memory_properties(context.device().physical_device().handle()) };
 
+    let command_buffer_allocator =
+        StandardCommandBufferAllocator::new(context.device().clone(), Default::default());
+
     // acceleration structures
 
-    let (vertex_count, vertex_stride, vertex_buffer) = {
+    let top_level_acceleration_structure = {
+        #[derive(BufferContents, Vertex)]
+        #[repr(C)]
+        struct Vertex {
+            #[format(R32G32B32_SFLOAT)]
+            position: [f32; 3],
+        }
+
         let vertices = [
             Vertex {
-                pos: [-0.5, -0.5, 0.0],
+                position: [-0.5, -0.5, 0.0],
             },
             Vertex {
-                pos: [0.0, 0.5, 0.0],
+                position: [0.0, 0.5, 0.0],
             },
             Vertex {
-                pos: [0.5, -0.5, 0.0],
+                position: [0.5, -0.5, 0.0],
             },
         ];
 
-        let vertex_count = vertices.len();
-        let vertex_stride = std::mem::size_of::<Vertex>();
-
-        let vertex_buffer_size = vertex_stride * vertex_count;
-
-        let mut vertex_buffer = BufferResource::new(
-            vertex_buffer_size as vk::DeviceSize,
-            vk::BufferUsageFlags::VERTEX_BUFFER
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            &device,
-            device_memory_properties,
-        );
-
-        vertex_buffer.store(&vertices, &device);
-
-        (vertex_count, vertex_stride, vertex_buffer)
-    };
-
-    let (index_count, index_buffer) = {
-        let indices: [u32; 3] = [0, 1, 2];
-
-        let index_count = indices.len();
-        let index_buffer_size = std::mem::size_of::<usize>() * index_count;
-
-        let mut index_buffer = BufferResource::new(
-            index_buffer_size as vk::DeviceSize,
-            vk::BufferUsageFlags::INDEX_BUFFER
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            &device,
-            device_memory_properties,
-        );
-
-        index_buffer.store(&indices, &device);
-        (index_count, index_buffer)
-    };
-
-    let geometry = vk::AccelerationStructureGeometryKHR::builder()
-        .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-        .geometry(vk::AccelerationStructureGeometryDataKHR {
-            triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
-                .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                    device_address: unsafe {
-                        get_buffer_device_address(&device, vertex_buffer.buffer)
-                    },
-                })
-                .max_vertex(vertex_count as u32 - 1)
-                .vertex_stride(vertex_stride as u64)
-                .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                .index_data(vk::DeviceOrHostAddressConstKHR {
-                    device_address: unsafe {
-                        get_buffer_device_address(&device, index_buffer.buffer)
-                    },
-                })
-                .index_type(vk::IndexType::UINT32)
-                .build(),
-        })
-        .flags(vk::GeometryFlagsKHR::OPAQUE)
-        .build();
-
-    // Create bottom-level acceleration structure
-
-    let (bottom_as, bottom_as_buffer) = {
-        let build_range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
-            .first_vertex(0)
-            .primitive_count(index_count as u32 / 3)
-            .primitive_offset(0)
-            .transform_offset(0)
-            .build();
-
-        let geometries = [geometry];
-
-        let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-            .geometries(&geometries)
-            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-            .build();
-
-        let size_info = unsafe {
-            acceleration_structure.get_acceleration_structure_build_sizes(
-                vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                &build_info,
-                &[index_count as u32 / 3],
-            )
-        };
-
-        let bottom_as_buffer = BufferResource::new(
-            size_info.acceleration_structure_size,
-            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &device,
-            device_memory_properties,
-        );
-
-        let as_create_info = vk::AccelerationStructureCreateInfoKHR::builder()
-            .ty(build_info.ty)
-            .size(size_info.acceleration_structure_size)
-            .buffer(bottom_as_buffer.buffer)
-            .offset(0)
-            .build();
-
-        let bottom_as =
-            unsafe { acceleration_structure.create_acceleration_structure(&as_create_info, None) }
-                .unwrap();
-
-        build_info.dst_acceleration_structure = bottom_as;
-
-        let scratch_buffer = BufferResource::new(
-            size_info.build_scratch_size,
-            vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &device,
-            device_memory_properties,
-        );
-
-        build_info.scratch_data = vk::DeviceOrHostAddressKHR {
-            device_address: unsafe { get_buffer_device_address(&device, scratch_buffer.buffer) },
-        };
-
-        let build_command_buffer = {
-            let allocate_info = vk::CommandBufferAllocateInfo::builder()
-                .command_buffer_count(1)
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .build();
-
-            let command_buffers =
-                unsafe { device.allocate_command_buffers(&allocate_info) }.unwrap();
-            command_buffers[0]
-        };
-
-        unsafe {
-            device
-                .begin_command_buffer(
-                    build_command_buffer,
-                    &vk::CommandBufferBeginInfo::builder()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-                        .build(),
-                )
-                .unwrap();
-
-            acceleration_structure.cmd_build_acceleration_structures(
-                build_command_buffer,
-                &[build_info],
-                &[&[build_range_info]],
-            );
-            device.end_command_buffer(build_command_buffer).unwrap();
-            device
-                .queue_submit(
-                    graphics_queue,
-                    &[vk::SubmitInfo::builder()
-                        .command_buffers(&[build_command_buffer])
-                        .build()],
-                    vk::Fence::null(),
-                )
-                .expect("queue submit failed.");
-
-            device.queue_wait_idle(graphics_queue).unwrap();
-            device.free_command_buffers(command_pool, &[build_command_buffer]);
-            scratch_buffer.destroy(&device);
-        }
-        (bottom_as, bottom_as_buffer)
-    };
-
-    let accel_handle = {
-        let as_addr_info = vk::AccelerationStructureDeviceAddressInfoKHR::builder()
-            .acceleration_structure(bottom_as)
-            .build();
-        unsafe { acceleration_structure.get_acceleration_structure_device_address(&as_addr_info) }
-    };
-
-    let (instance_count, instance_buffer) = {
-        let transform_0: [f32; 12] = [1.0, 0.0, 0.0, -1.5, 0.0, 1.0, 0.0, 1.1, 0.0, 0.0, 1.0, 0.0];
-
-        let transform_1: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.1, 0.0, 0.0, 1.0, 0.0];
-
-        let transform_2: [f32; 12] = [1.0, 0.0, 0.0, 1.5, 0.0, 1.0, 0.0, 1.1, 0.0, 0.0, 1.0, 0.0];
-
-        let instances = vec![
-            vk::AccelerationStructureInstanceKHR {
-                transform: vk::TransformMatrixKHR {
-                    matrix: transform_0,
-                },
-                instance_custom_index_and_mask: Packed24_8::new(0, 0xff),
-                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
-                    0,
-                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
-                ),
-                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                    device_handle: accel_handle,
-                },
+        let vertex_buffer = Buffer::from_iter(
+            context.memory_allocator().clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY
+                    | BufferUsage::SHADER_DEVICE_ADDRESS,
+                ..Default::default()
             },
-            vk::AccelerationStructureInstanceKHR {
-                transform: vk::TransformMatrixKHR {
-                    matrix: transform_1,
-                },
-                instance_custom_index_and_mask: Packed24_8::new(1, 0xff),
-                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
-                    0,
-                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
-                ),
-                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                    device_handle: accel_handle,
-                },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
             },
-            vk::AccelerationStructureInstanceKHR {
-                transform: vk::TransformMatrixKHR {
-                    matrix: transform_2,
-                },
-                instance_custom_index_and_mask: Packed24_8::new(2, 0xff),
-                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
-                    0,
-                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
-                ),
-                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                    device_handle: accel_handle,
-                },
-            },
-        ];
+            vertices,
+        )
+        .unwrap();
 
-        let instance_buffer_size =
-            std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() * instances.len();
-
-        let mut instance_buffer = BufferResource::new(
-            instance_buffer_size as vk::DeviceSize,
-            vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            &device,
-            device_memory_properties,
+        let bottom_level_acceleration_structure = create_bottom_level_acceleration_structure(
+            context.memory_allocator().clone(),
+            &command_buffer_allocator,
+            context.graphics_queue().clone(),
+            &[&vertex_buffer],
+        );
+        let top_level_acceleration_structure = create_top_level_acceleration_structure(
+            context.memory_allocator().clone(),
+            &command_buffer_allocator,
+            context.graphics_queue().clone(),
+            &bottom_level_acceleration_structure,
         );
 
-        instance_buffer.store(&instances, &device);
-
-        (instances.len(), instance_buffer)
-    };
-
-    let (top_as, top_as_buffer) = {
-        let build_range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
-            .first_vertex(0)
-            .primitive_count(instance_count as u32)
-            .primitive_offset(0)
-            .transform_offset(0)
-            .build();
-
-        let build_command_buffer = {
-            let allocate_info = vk::CommandBufferAllocateInfo::builder()
-                .command_buffer_count(1)
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .build();
-
-            let command_buffers =
-                unsafe { device.allocate_command_buffers(&allocate_info) }.unwrap();
-            command_buffers[0]
-        };
-
-        unsafe {
-            device
-                .begin_command_buffer(
-                    build_command_buffer,
-                    &vk::CommandBufferBeginInfo::builder()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-                        .build(),
-                )
-                .unwrap();
-            let memory_barrier = vk::MemoryBarrier::builder()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
-                .build();
-            device.cmd_pipeline_barrier(
-                build_command_buffer,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
-                vk::DependencyFlags::empty(),
-                &[memory_barrier],
-                &[],
-                &[],
-            );
-        }
-
-        let instances = vk::AccelerationStructureGeometryInstancesDataKHR::builder()
-            .array_of_pointers(false)
-            .data(vk::DeviceOrHostAddressConstKHR {
-                device_address: unsafe {
-                    get_buffer_device_address(&device, instance_buffer.buffer)
-                },
-            })
-            .build();
-
-        let geometry = vk::AccelerationStructureGeometryKHR::builder()
-            .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-            .geometry(vk::AccelerationStructureGeometryDataKHR { instances })
-            .build();
-
-        let geometries = [geometry];
-
-        let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-            .geometries(&geometries)
-            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-            .build();
-
-        let size_info = unsafe {
-            acceleration_structure.get_acceleration_structure_build_sizes(
-                vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                &build_info,
-                &[build_range_info.primitive_count],
-            )
-        };
-
-        let top_as_buffer = BufferResource::new(
-            size_info.acceleration_structure_size,
-            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &device,
-            device_memory_properties,
-        );
-
-        let as_create_info = vk::AccelerationStructureCreateInfoKHR::builder()
-            .ty(build_info.ty)
-            .size(size_info.acceleration_structure_size)
-            .buffer(top_as_buffer.buffer)
-            .offset(0)
-            .build();
-
-        let top_as =
-            unsafe { acceleration_structure.create_acceleration_structure(&as_create_info, None) }
-                .unwrap();
-
-        build_info.dst_acceleration_structure = top_as;
-
-        let scratch_buffer = BufferResource::new(
-            size_info.build_scratch_size,
-            vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &device,
-            device_memory_properties,
-        );
-
-        build_info.scratch_data = vk::DeviceOrHostAddressKHR {
-            device_address: unsafe { get_buffer_device_address(&device, scratch_buffer.buffer) },
-        };
-
-        unsafe {
-            acceleration_structure.cmd_build_acceleration_structures(
-                build_command_buffer,
-                &[build_info],
-                &[&[build_range_info]],
-            );
-            device.end_command_buffer(build_command_buffer).unwrap();
-            device
-                .queue_submit(
-                    graphics_queue,
-                    &[vk::SubmitInfo::builder()
-                        .command_buffers(&[build_command_buffer])
-                        .build()],
-                    vk::Fence::null(),
-                )
-                .expect("queue submit failed.");
-
-            device.queue_wait_idle(graphics_queue).unwrap();
-            device.free_command_buffers(command_pool, &[build_command_buffer]);
-            scratch_buffer.destroy(&device);
-        }
-
-        (top_as, top_as_buffer)
+        top_level_acceleration_structure
     };
 
     let (descriptor_set_layout, graphics_pipeline, pipeline_layout, shader_group_count) = {
@@ -754,7 +410,7 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
     }
     .unwrap()[0];
 
-    let accel_structs = [top_as];
+    let accel_structs = [top_level_acceleration_structure.handle()];
     let mut accel_info = vk::WriteDescriptorSetAccelerationStructureKHR::builder()
         .acceleration_structures(&accel_structs)
         .build();
@@ -877,7 +533,6 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
     }
 
     unsafe {
-        // device.destroy_descriptor_set_layout(layout, allocation_callbacks)
         device.destroy_descriptor_pool(descriptor_pool, None);
         shader_binding_table_buffer.destroy(&device);
         device.destroy_pipeline(graphics_pipeline, None);
@@ -889,18 +544,7 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
     }
 
     unsafe {
-        acceleration_structure.destroy_acceleration_structure(bottom_as, None);
-        bottom_as_buffer.destroy(&device);
-
-        acceleration_structure.destroy_acceleration_structure(top_as, None);
-        top_as_buffer.destroy(&device);
-    }
-
-    unsafe {
         color_buffer.destroy(&device);
-        instance_buffer.destroy(&device);
-        vertex_buffer.destroy(&device);
-        index_buffer.destroy(&device);
     }
 }
 
@@ -1035,4 +679,244 @@ unsafe fn get_buffer_device_address(device: &ash::Device, buffer: vk::Buffer) ->
         .build();
 
     device.get_buffer_device_address(&buffer_device_address_info)
+}
+
+fn create_bottom_level_acceleration_structure<T: BufferContents + Vertex>(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    command_buffer_allocator: &StandardCommandBufferAllocator,
+    queue: Arc<Queue>,
+    vertex_buffers: &[&Subbuffer<[T]>],
+) -> Arc<AccelerationStructure> {
+    let description = T::per_vertex();
+
+    assert_eq!(description.stride, std::mem::size_of::<T>() as u32);
+
+    let mut triangles = vec![];
+    let mut max_primitive_counts = vec![];
+    let mut build_range_infos = vec![];
+
+    for &vertex_buffer in vertex_buffers {
+        let primitive_count = vertex_buffer.len() as u32 / 3;
+        triangles.push(AccelerationStructureGeometryTrianglesData {
+            flags: GeometryFlags::OPAQUE,
+            vertex_data: Some(vertex_buffer.clone().into_bytes()),
+            vertex_stride: description.stride,
+            max_vertex: vertex_buffer.len() as _,
+            index_data: None,
+            transform_data: None,
+            ..AccelerationStructureGeometryTrianglesData::new(
+                description.members.get("position").unwrap().format,
+            )
+        });
+        max_primitive_counts.push(primitive_count);
+        build_range_infos.push(AccelerationStructureBuildRangeInfo {
+            primitive_count,
+            primitive_offset: 0,
+            first_vertex: 0,
+            transform_offset: 0,
+        })
+    }
+
+    let geometries = AccelerationStructureGeometries::Triangles(triangles);
+    let build_info = AccelerationStructureBuildGeometryInfo {
+        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
+        mode: BuildAccelerationStructureMode::Build,
+        ..AccelerationStructureBuildGeometryInfo::new(geometries)
+    };
+
+    build_acceleration_structure(
+        memory_allocator,
+        command_buffer_allocator,
+        queue,
+        AccelerationStructureType::BottomLevel,
+        build_info,
+        &max_primitive_counts,
+        build_range_infos,
+    )
+}
+
+fn create_top_level_acceleration_structure(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    command_buffer_allocator: &StandardCommandBufferAllocator,
+    queue: Arc<Queue>,
+    bottom_level_acceleration_structure: &AccelerationStructure,
+) -> Arc<AccelerationStructure> {
+    let transforms = [[
+            [1.0, 0.0, 0.0, -1.5],
+            [0.0, 1.0, 0.0, 1.1],
+            [0.0, 0.0, 1.0, 0.0],
+        ], [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, -1.1],
+            [0.0, 0.0, 1.0, 0.0],
+        ], [
+            [1.0, 0.0, 0.0, 1.5],
+            [0.0, 1.0, 0.0, 1.1],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+    ];
+    let instances = transforms.into_iter().enumerate().map(|(i, transform)| {
+        AccelerationStructureInstance {
+            transform,
+            instance_custom_index_and_mask: Packed24_8::new(i as _, 0xff),
+            instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
+                0, GeometryInstanceFlags::TRIANGLE_FACING_CULL_DISABLE.into()),
+            acceleration_structure_reference: bottom_level_acceleration_structure.device_address().get(),
+        }
+    })
+    .collect::<Vec<_>>();
+
+    let instance_count = instances.len();
+
+    let values = Buffer::from_iter(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY
+                | BufferUsage::SHADER_DEVICE_ADDRESS,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        instances,
+    )
+    .unwrap();
+
+    let geometries =
+        AccelerationStructureGeometries::Instances(AccelerationStructureGeometryInstancesData {
+            flags: GeometryFlags::OPAQUE,
+            ..AccelerationStructureGeometryInstancesData::new(
+                AccelerationStructureGeometryInstancesDataType::Values(Some(values)),
+            )
+        });
+
+    let build_info = AccelerationStructureBuildGeometryInfo {
+        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
+        mode: BuildAccelerationStructureMode::Build,
+        ..AccelerationStructureBuildGeometryInfo::new(geometries)
+    };
+
+    let build_range_infos = [AccelerationStructureBuildRangeInfo {
+        primitive_count: instance_count as _,
+        primitive_offset: 0,
+        first_vertex: 0,
+        transform_offset: 0,
+    }];
+
+    build_acceleration_structure(
+        memory_allocator,
+        command_buffer_allocator,
+        queue,
+        AccelerationStructureType::TopLevel,
+        build_info,
+        &[instance_count as _],
+        build_range_infos,
+    )
+}
+
+fn build_acceleration_structure(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    command_buffer_allocator: &StandardCommandBufferAllocator,
+    queue: Arc<Queue>,
+    ty: AccelerationStructureType,
+    mut build_info: AccelerationStructureBuildGeometryInfo,
+    max_primitive_counts: &[u32],
+    build_range_infos: impl IntoIterator<Item = AccelerationStructureBuildRangeInfo>,
+) -> Arc<AccelerationStructure> {
+    let device = memory_allocator.device();
+
+    let AccelerationStructureBuildSizesInfo {
+        acceleration_structure_size,
+        build_scratch_size,
+        ..
+    } = device
+        .acceleration_structure_build_sizes(
+            AccelerationStructureBuildType::Device,
+            &build_info,
+            max_primitive_counts,
+        )
+        .unwrap();
+
+    let acceleration_structure =
+        create_acceleration_structure(memory_allocator.clone(), ty, acceleration_structure_size);
+    let scratch_buffer = create_scratch_buffer(memory_allocator, build_scratch_size);
+
+    build_info.dst_acceleration_structure = Some(acceleration_structure.clone());
+    build_info.scratch_data = Some(scratch_buffer);
+
+    let mut builder = AutoCommandBufferBuilder::primary(
+        command_buffer_allocator,
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+
+    unsafe {
+        builder
+            .build_acceleration_structure(build_info, build_range_infos.into_iter().collect())
+            .unwrap();
+    }
+
+    let command_buffer = builder.build().unwrap();
+    command_buffer
+        .execute(queue)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap()
+        .wait(None)
+        .unwrap();
+
+    acceleration_structure
+}
+
+fn create_acceleration_structure(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    ty: AccelerationStructureType,
+    size: DeviceSize,
+) -> Arc<AccelerationStructure> {
+    let buffer = Buffer::new_slice::<u8>(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+        size,
+    )
+    .unwrap();
+
+    unsafe {
+        AccelerationStructure::new(
+            memory_allocator.device().clone(),
+            AccelerationStructureCreateInfo {
+                ty,
+                ..AccelerationStructureCreateInfo::new(buffer)
+            },
+        )
+        .unwrap()
+    }
+}
+
+fn create_scratch_buffer(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    size: DeviceSize,
+) -> Subbuffer<[u8]> {
+    Buffer::new_slice::<u8>(
+        memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER | BufferUsage::SHADER_DEVICE_ADDRESS,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+        size,
+    )
+    .unwrap()
 }

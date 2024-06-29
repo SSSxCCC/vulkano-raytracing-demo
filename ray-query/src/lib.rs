@@ -225,7 +225,7 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: 
     let command_buffer_allocator =
         StandardCommandBufferAllocator::new(context.device().clone(), Default::default());
 
-    let (top_level_acceleration_structure, _bottom_level_acceleration_structure) = {
+    let top_level_acceleration_structure = {
         #[derive(BufferContents, Vertex)]
         #[repr(C)]
         struct Vertex {
@@ -274,10 +274,7 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: 
             &[&bottom_level_acceleration_structure],
         );
 
-        (
-            top_level_acceleration_structure,
-            bottom_level_acceleration_structure,
-        )
+        top_level_acceleration_structure
     };
 
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(context.device().clone(), StandardDescriptorSetAllocatorCreateInfo::default());
@@ -332,6 +329,60 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: 
         .execute_after(gpu_future, context.graphics_queue().clone())
         .unwrap()
         .boxed()
+}
+
+fn create_bottom_level_acceleration_structure<T: BufferContents + Vertex>(
+    memory_allocator: Arc<dyn MemoryAllocator>,
+    command_buffer_allocator: &StandardCommandBufferAllocator,
+    queue: Arc<Queue>,
+    vertex_buffers: &[&Subbuffer<[T]>],
+) -> Arc<AccelerationStructure> {
+    let description = T::per_vertex();
+
+    assert_eq!(description.stride, std::mem::size_of::<T>() as u32);
+
+    let mut triangles = vec![];
+    let mut max_primitive_counts = vec![];
+    let mut build_range_infos = vec![];
+
+    for &vertex_buffer in vertex_buffers {
+        let primitive_count = vertex_buffer.len() as u32 / 3;
+        triangles.push(AccelerationStructureGeometryTrianglesData {
+            flags: GeometryFlags::OPAQUE,
+            vertex_data: Some(vertex_buffer.clone().into_bytes()),
+            vertex_stride: description.stride,
+            max_vertex: vertex_buffer.len() as _,
+            index_data: None,
+            transform_data: None,
+            ..AccelerationStructureGeometryTrianglesData::new(
+                description.members.get("position").unwrap().format,
+            )
+        });
+        max_primitive_counts.push(primitive_count);
+        build_range_infos.push(AccelerationStructureBuildRangeInfo {
+            primitive_count,
+            primitive_offset: 0,
+            first_vertex: 0,
+            transform_offset: 0,
+        })
+    }
+
+    let geometries = AccelerationStructureGeometries::Triangles(triangles);
+    let build_info = AccelerationStructureBuildGeometryInfo {
+        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
+        mode: BuildAccelerationStructureMode::Build,
+        ..AccelerationStructureBuildGeometryInfo::new(geometries)
+    };
+
+    build_acceleration_structure(
+        memory_allocator,
+        command_buffer_allocator,
+        queue,
+        AccelerationStructureType::BottomLevel,
+        build_info,
+        &max_primitive_counts,
+        build_range_infos,
+    )
 }
 
 fn create_top_level_acceleration_structure(
@@ -400,60 +451,6 @@ fn create_top_level_acceleration_structure(
         AccelerationStructureType::TopLevel,
         build_info,
         &[bottom_level_acceleration_structures.len() as u32],
-        build_range_infos,
-    )
-}
-
-fn create_bottom_level_acceleration_structure<T: BufferContents + Vertex>(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    command_buffer_allocator: &StandardCommandBufferAllocator,
-    queue: Arc<Queue>,
-    vertex_buffers: &[&Subbuffer<[T]>],
-) -> Arc<AccelerationStructure> {
-    let description = T::per_vertex();
-
-    assert_eq!(description.stride, std::mem::size_of::<T>() as u32);
-
-    let mut triangles = vec![];
-    let mut max_primitive_counts = vec![];
-    let mut build_range_infos = vec![];
-
-    for &vertex_buffer in vertex_buffers {
-        let primitive_count = vertex_buffer.len() as u32 / 3;
-        triangles.push(AccelerationStructureGeometryTrianglesData {
-            flags: GeometryFlags::OPAQUE,
-            vertex_data: Some(vertex_buffer.clone().into_bytes()),
-            vertex_stride: description.stride,
-            max_vertex: vertex_buffer.len() as _,
-            index_data: None,
-            transform_data: None,
-            ..AccelerationStructureGeometryTrianglesData::new(
-                description.members.get("position").unwrap().format,
-            )
-        });
-        max_primitive_counts.push(primitive_count);
-        build_range_infos.push(AccelerationStructureBuildRangeInfo {
-            primitive_count,
-            primitive_offset: 0,
-            first_vertex: 0,
-            transform_offset: 0,
-        })
-    }
-
-    let geometries = AccelerationStructureGeometries::Triangles(triangles);
-    let build_info = AccelerationStructureBuildGeometryInfo {
-        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
-        mode: BuildAccelerationStructureMode::Build,
-        ..AccelerationStructureBuildGeometryInfo::new(geometries)
-    };
-
-    build_acceleration_structure(
-        memory_allocator,
-        command_buffer_allocator,
-        queue,
-        AccelerationStructureType::BottomLevel,
-        build_info,
-        &max_primitive_counts,
         build_range_infos,
     )
 }
