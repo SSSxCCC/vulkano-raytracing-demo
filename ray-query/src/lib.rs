@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use vulkano::{
     acceleration_structure::{
-        AccelerationStructureBuildSizesInfo, AccelerationStructureBuildType,
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
-        AccelerationStructureBuildRangeInfo, AccelerationStructureCreateInfo,
+        AccelerationStructureBuildRangeInfo, AccelerationStructureBuildSizesInfo,
+        AccelerationStructureBuildType, AccelerationStructureCreateInfo,
         AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData,
         AccelerationStructureGeometryInstancesDataType, AccelerationStructureGeometryTrianglesData,
         AccelerationStructureInstance, AccelerationStructureType, BuildAccelerationStructureFlags,
@@ -18,13 +18,12 @@ use vulkano::{
         allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
         PersistentDescriptorSet, WriteDescriptorSet,
     },
+    device::Queue,
     image::{view::ImageView, ImageUsage},
-    memory::allocator::{
-        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter,
-    },
+    memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
     pipeline::{
         graphics::{
-            color_blend::{ColorBlendState, ColorBlendAttachmentState},
+            color_blend::{ColorBlendAttachmentState, ColorBlendState},
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
             rasterization::RasterizationState,
@@ -34,15 +33,17 @@ use vulkano::{
             GraphicsPipelineCreateInfo,
         },
         layout::PipelineDescriptorSetLayoutCreateInfo,
-        GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
-        PipelineShaderStageCreateInfo, DynamicState,
+        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
     },
-    device::Queue,
     render_pass::AttachmentStoreOp,
     sync::GpuFuture,
     DeviceSize, Packed24_8,
 };
-use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
+use vulkano_util::{
+    context::{VulkanoConfig, VulkanoContext},
+    window::{VulkanoWindows, WindowDescriptor},
+};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
@@ -61,7 +62,9 @@ use winit::platform::android::activity::AndroidApp;
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Trace));
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
+    );
     use winit::platform::android::EventLoopBuilderExtAndroid;
     let event_loop = EventLoopBuilder::new().with_android_app(app).build();
     _main(event_loop);
@@ -70,7 +73,10 @@ fn android_main(app: AndroidApp) {
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
 fn main() {
-    env_logger::builder().filter_level(log::LevelFilter::Trace).parse_default_env().init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Trace)
+        .parse_default_env()
+        .init();
     let event_loop = EventLoopBuilder::new().build();
     _main(event_loop);
 }
@@ -90,31 +96,39 @@ fn _main(event_loop: EventLoop<()>) {
     event_loop.run(move |event, event_loop, control_flow| match event {
         Event::Resumed => {
             log::debug!("Event::Resumed");
-            windows.create_window(&event_loop, &context,
-                &WindowDescriptor::default(), |info| {
+            windows.create_window(
+                &event_loop,
+                &context,
+                &WindowDescriptor::default(),
+                |info| {
                     //info.image_format = Some(Format::R8G8B8A8_UNORM);
                     info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
-                });
+                },
+            );
         }
         Event::Suspended => {
             log::debug!("Event::Suspended");
             windows.remove_renderer(windows.primary_window_id().unwrap());
         }
-        Event::WindowEvent { event , .. } => match event {
+        Event::WindowEvent { event, .. } => match event {
             WindowEvent::CloseRequested => {
                 log::debug!("WindowEvent::CloseRequested");
                 *control_flow = ControlFlow::Exit;
             }
             WindowEvent::Resized(_) => {
                 log::debug!("WindowEvent::Resized");
-                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+                if let Some(renderer) = windows.get_primary_renderer_mut() {
+                    renderer.resize()
+                }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 log::debug!("WindowEvent::ScaleFactorChanged");
-                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+                if let Some(renderer) = windows.get_primary_renderer_mut() {
+                    renderer.resize()
+                }
             }
-            _ => ()
-        }
+            _ => (),
+        },
         Event::RedrawRequested(_) => {
             if let Some(renderer) = windows.get_primary_renderer_mut() {
                 let gpu_future = renderer.acquire().unwrap();
@@ -123,13 +137,19 @@ fn _main(event_loop: EventLoop<()>) {
             }
         }
         Event::MainEventsCleared => {
-            if let Some(renderer) = windows.get_primary_renderer() { renderer.window().request_redraw() }
+            if let Some(renderer) = windows.get_primary_renderer() {
+                renderer.window().request_redraw()
+            }
         }
         _ => (),
     });
 }
 
-fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: Box<dyn GpuFuture>) -> Box<dyn GpuFuture> {
+fn draw_image(
+    context: &VulkanoContext,
+    image_view: Arc<ImageView>,
+    gpu_future: Box<dyn GpuFuture>,
+) -> Box<dyn GpuFuture> {
     // The quad buffer that covers the entire surface
     let quad = [
         MyVertex {
@@ -205,7 +225,8 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: 
                 multisample_state: Some(MultisampleState::default()),
                 color_blend_state: Some(ColorBlendState::with_attachment_states(
                     subpass.color_attachment_formats.len() as u32,
-                    ColorBlendAttachmentState::default())),
+                    ColorBlendAttachmentState::default(),
+                )),
                 viewport_state: Some(ViewportState::default()),
                 dynamic_state: [DynamicState::Viewport].into_iter().collect(),
                 subpass: Some(subpass.into()),
@@ -277,7 +298,10 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: 
         top_level_acceleration_structure
     };
 
-    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(context.device().clone(), StandardDescriptorSetAllocatorCreateInfo::default());
+    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+        context.device().clone(),
+        StandardDescriptorSetAllocatorCreateInfo::default(),
+    );
 
     let descriptor_set = PersistentDescriptorSet::new(
         &descriptor_set_allocator,
@@ -300,9 +324,7 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>, gpu_future: 
         .begin_rendering(RenderingInfo {
             color_attachments: vec![Some(RenderingAttachmentInfo {
                 store_op: AttachmentStoreOp::Store,
-                ..RenderingAttachmentInfo::image_view(
-                    image_view.clone(),
-                )
+                ..RenderingAttachmentInfo::image_view(image_view.clone())
             })],
             ..Default::default()
         })

@@ -1,7 +1,4 @@
-#![cfg_attr(
-    target_arch = "spirv",
-    no_std,
-)]
+#![cfg_attr(target_arch = "spirv", no_std)]
 
 use crate::bool::Bool32;
 use camera::Camera;
@@ -118,7 +115,7 @@ pub fn main_ray_generation(
     #[spirv(launch_size)] launch_size: UVec3,
     #[spirv(push_constant)] constants: &PushConstants,
     #[spirv(descriptor_set = 0, binding = 0)] top_level_as: &AccelerationStructure,
-    #[spirv(descriptor_set = 0, binding = 1)] image: &Image!(2D, format=rgba8, sampled=false),
+    #[spirv(descriptor_set = 0, binding = 1)] image: &Image!(2D, format = rgba8, sampled = false),
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] materials: &[EnumMaterial],
     #[spirv(ray_payload)] payload: &mut RayPayload,
 ) {
@@ -138,7 +135,7 @@ pub fn main_ray_generation(
     let cull_mask = 0xff;
     let tmin = 0.001;
     let tmax = 100000.0;
-    
+
     let mut final_color = vec3(0.0, 0.0, 0.0);
 
     const N_SAMPLES: u32 = 100;

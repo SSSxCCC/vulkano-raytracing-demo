@@ -1,8 +1,21 @@
+use ash::{
+    prelude::VkResult,
+    util::Align,
+    vk::{self, Packed24_8},
+};
 use std::{ptr, sync::Arc};
-use ash::{prelude::VkResult, util::Align, vk::{self, Packed24_8}};
-use vulkano::{image::{view::ImageView, ImageUsage}, VulkanObject};
-use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
-use winit::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop, EventLoopBuilder}};
+use vulkano::{
+    image::{view::ImageView, ImageUsage},
+    VulkanObject,
+};
+use vulkano_util::{
+    context::{VulkanoConfig, VulkanoContext},
+    window::{VulkanoWindows, WindowDescriptor},
+};
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
+};
 
 #[repr(C)]
 #[derive(Clone, Debug, Copy)]
@@ -16,7 +29,9 @@ use winit::platform::android::activity::AndroidApp;
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Trace));
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
+    );
     use winit::platform::android::EventLoopBuilderExtAndroid;
     let event_loop = EventLoopBuilder::new().with_android_app(app).build();
     _main(event_loop);
@@ -25,7 +40,10 @@ fn android_main(app: AndroidApp) {
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
 fn main() {
-    env_logger::builder().filter_level(log::LevelFilter::Trace).parse_default_env().init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Trace)
+        .parse_default_env()
+        .init();
     let event_loop = EventLoopBuilder::new().build();
     _main(event_loop);
 }
@@ -43,31 +61,39 @@ fn _main(event_loop: EventLoop<()>) {
     event_loop.run(move |event, event_loop, control_flow| match event {
         Event::Resumed => {
             log::debug!("Event::Resumed");
-            windows.create_window(&event_loop, &context,
-                &WindowDescriptor::default(), |info| {
+            windows.create_window(
+                &event_loop,
+                &context,
+                &WindowDescriptor::default(),
+                |info| {
                     //info.image_format = Some(Format::R32G32B32A32_SFLOAT);
                     info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
-                });
+                },
+            );
         }
         Event::Suspended => {
             log::debug!("Event::Suspended");
             windows.remove_renderer(windows.primary_window_id().unwrap());
         }
-        Event::WindowEvent { event , .. } => match event {
+        Event::WindowEvent { event, .. } => match event {
             WindowEvent::CloseRequested => {
                 log::debug!("WindowEvent::CloseRequested");
                 *control_flow = ControlFlow::Exit;
             }
             WindowEvent::Resized(_) => {
                 log::debug!("WindowEvent::Resized");
-                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+                if let Some(renderer) = windows.get_primary_renderer_mut() {
+                    renderer.resize()
+                }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 log::debug!("WindowEvent::ScaleFactorChanged");
-                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+                if let Some(renderer) = windows.get_primary_renderer_mut() {
+                    renderer.resize()
+                }
             }
-            _ => ()
-        }
+            _ => (),
+        },
         Event::RedrawRequested(_) => {
             if let Some(renderer) = windows.get_primary_renderer_mut() {
                 let gpu_future = renderer.acquire().unwrap();
@@ -76,7 +102,9 @@ fn _main(event_loop: EventLoop<()>) {
             }
         }
         Event::MainEventsCleared => {
-            if let Some(renderer) = windows.get_primary_renderer() { renderer.window().request_redraw() }
+            if let Some(renderer) = windows.get_primary_renderer() {
+                renderer.window().request_redraw()
+            }
         }
         _ => (),
     });
@@ -96,8 +124,10 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
             .build();
 
         unsafe {
-            instance
-                .get_physical_device_properties2(context.device().physical_device().handle(), &mut physical_device_properties2);
+            instance.get_physical_device_properties2(
+                context.device().physical_device().handle(),
+                &mut physical_device_properties2,
+            );
         }
     }
     let acceleration_structure =
@@ -116,8 +146,9 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
             .expect("Failed to create Command Pool!")
     };
 
-    let device_memory_properties =
-        unsafe { instance.get_physical_device_memory_properties(context.device().physical_device().handle()) };
+    let device_memory_properties = unsafe {
+        instance.get_physical_device_memory_properties(context.device().physical_device().handle())
+    };
 
     // acceleration structures
 
@@ -470,8 +501,10 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
                     matrix: transform_0,
                 },
                 instance_custom_index_and_mask: Packed24_8::new(0, 0xff),
-                instance_shader_binding_table_record_offset_and_flags:
-                    Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
+                    0,
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
+                ),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
                     device_handle: accel_handle,
                 },
@@ -481,8 +514,10 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
                     matrix: transform_1,
                 },
                 instance_custom_index_and_mask: Packed24_8::new(1, 0xff),
-                instance_shader_binding_table_record_offset_and_flags:
-                    Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
+                    0,
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
+                ),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
                     device_handle: accel_handle,
                 },
@@ -492,8 +527,10 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
                     matrix: transform_2,
                 },
                 instance_custom_index_and_mask: Packed24_8::new(2, 0xff),
-                instance_shader_binding_table_record_offset_and_flags:
-                    Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
+                    0,
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
+                ),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
                     device_handle: accel_handle,
                 },
@@ -503,8 +540,10 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
                     matrix: transform_3,
                 },
                 instance_custom_index_and_mask: Packed24_8::new(3, 0xff),
-                instance_shader_binding_table_record_offset_and_flags:
-                    Packed24_8::new(1, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
+                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
+                    1,
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
+                ),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
                     device_handle: sphere_accel_handle,
                 },
@@ -1140,7 +1179,8 @@ fn get_memory_type_index(
 struct BufferResource {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
-    #[allow(unused)] size: vk::DeviceSize,
+    #[allow(unused)]
+    size: vk::DeviceSize,
 }
 
 impl BufferResource {

@@ -1,8 +1,35 @@
-use std::{ptr, sync::Arc};
 use ash::{prelude::VkResult, util::Align, vk};
-use vulkano::{acceleration_structure::{AccelerationStructure, AccelerationStructureBuildGeometryInfo, AccelerationStructureBuildRangeInfo, AccelerationStructureBuildSizesInfo, AccelerationStructureBuildType, AccelerationStructureCreateInfo, AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData, AccelerationStructureGeometryInstancesDataType, AccelerationStructureGeometryTrianglesData, AccelerationStructureInstance, AccelerationStructureType, BuildAccelerationStructureFlags, BuildAccelerationStructureMode, GeometryFlags, GeometryInstanceFlags}, buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer}, command_buffer::{allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage, PrimaryCommandBufferAbstract}, device::Queue, image::{view::ImageView, ImageUsage}, memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter}, pipeline::graphics::vertex_input::Vertex, sync::GpuFuture, DeviceSize, Packed24_8, VulkanObject};
-use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::{VulkanoWindows, WindowDescriptor}};
-use winit::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop, EventLoopBuilder}};
+use std::{ptr, sync::Arc};
+use vulkano::{
+    acceleration_structure::{
+        AccelerationStructure, AccelerationStructureBuildGeometryInfo,
+        AccelerationStructureBuildRangeInfo, AccelerationStructureBuildSizesInfo,
+        AccelerationStructureBuildType, AccelerationStructureCreateInfo,
+        AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData,
+        AccelerationStructureGeometryInstancesDataType, AccelerationStructureGeometryTrianglesData,
+        AccelerationStructureInstance, AccelerationStructureType, BuildAccelerationStructureFlags,
+        BuildAccelerationStructureMode, GeometryFlags, GeometryInstanceFlags,
+    },
+    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
+    command_buffer::{
+        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
+        PrimaryCommandBufferAbstract,
+    },
+    device::Queue,
+    image::{view::ImageView, ImageUsage},
+    memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
+    pipeline::graphics::vertex_input::Vertex,
+    sync::GpuFuture,
+    DeviceSize, Packed24_8, VulkanObject,
+};
+use vulkano_util::{
+    context::{VulkanoConfig, VulkanoContext},
+    window::{VulkanoWindows, WindowDescriptor},
+};
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
+};
 
 #[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
@@ -10,7 +37,9 @@ use winit::platform::android::activity::AndroidApp;
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Trace));
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
+    );
     use winit::platform::android::EventLoopBuilderExtAndroid;
     let event_loop = EventLoopBuilder::new().with_android_app(app).build();
     _main(event_loop);
@@ -19,7 +48,10 @@ fn android_main(app: AndroidApp) {
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
 fn main() {
-    env_logger::builder().filter_level(log::LevelFilter::Trace).parse_default_env().init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Trace)
+        .parse_default_env()
+        .init();
     let event_loop = EventLoopBuilder::new().build();
     _main(event_loop);
 }
@@ -38,31 +70,39 @@ fn _main(event_loop: EventLoop<()>) {
     event_loop.run(move |event, event_loop, control_flow| match event {
         Event::Resumed => {
             log::debug!("Event::Resumed");
-            windows.create_window(&event_loop, &context,
-                &WindowDescriptor::default(), |info| {
+            windows.create_window(
+                &event_loop,
+                &context,
+                &WindowDescriptor::default(),
+                |info| {
                     //info.image_format = Some(Format::R8G8B8A8_UNORM);
                     info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
-                });
+                },
+            );
         }
         Event::Suspended => {
             log::debug!("Event::Suspended");
             windows.remove_renderer(windows.primary_window_id().unwrap());
         }
-        Event::WindowEvent { event , .. } => match event {
+        Event::WindowEvent { event, .. } => match event {
             WindowEvent::CloseRequested => {
                 log::debug!("WindowEvent::CloseRequested");
                 *control_flow = ControlFlow::Exit;
             }
             WindowEvent::Resized(_) => {
                 log::debug!("WindowEvent::Resized");
-                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+                if let Some(renderer) = windows.get_primary_renderer_mut() {
+                    renderer.resize()
+                }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 log::debug!("WindowEvent::ScaleFactorChanged");
-                if let Some(renderer) = windows.get_primary_renderer_mut() { renderer.resize() }
+                if let Some(renderer) = windows.get_primary_renderer_mut() {
+                    renderer.resize()
+                }
             }
-            _ => ()
-        }
+            _ => (),
+        },
         Event::RedrawRequested(_) => {
             if let Some(renderer) = windows.get_primary_renderer_mut() {
                 let gpu_future = renderer.acquire().unwrap();
@@ -71,7 +111,9 @@ fn _main(event_loop: EventLoop<()>) {
             }
         }
         Event::MainEventsCleared => {
-            if let Some(renderer) = windows.get_primary_renderer() { renderer.window().request_redraw() }
+            if let Some(renderer) = windows.get_primary_renderer() {
+                renderer.window().request_redraw()
+            }
         }
         _ => (),
     });
@@ -90,7 +132,10 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
             .build();
 
         unsafe {
-            instance.get_physical_device_properties2(context.device().physical_device().handle(), &mut physical_device_properties2);
+            instance.get_physical_device_properties2(
+                context.device().physical_device().handle(),
+                &mut physical_device_properties2,
+            );
         }
     }
 
@@ -107,8 +152,9 @@ fn draw_image(context: &VulkanoContext, image_view: Arc<ImageView>) {
             .expect("Failed to create Command Pool!")
     };
 
-    let device_memory_properties =
-        unsafe { instance.get_physical_device_memory_properties(context.device().physical_device().handle()) };
+    let device_memory_properties = unsafe {
+        instance.get_physical_device_memory_properties(context.device().physical_device().handle())
+    };
 
     let command_buffer_allocator =
         StandardCommandBufferAllocator::new(context.device().clone(), Default::default());
@@ -741,30 +787,38 @@ fn create_top_level_acceleration_structure(
     queue: Arc<Queue>,
     bottom_level_acceleration_structure: &AccelerationStructure,
 ) -> Arc<AccelerationStructure> {
-    let transforms = [[
+    let transforms = [
+        [
             [1.0, 0.0, 0.0, -1.5],
             [0.0, 1.0, 0.0, 1.1],
             [0.0, 0.0, 1.0, 0.0],
-        ], [
+        ],
+        [
             [1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, -1.1],
             [0.0, 0.0, 1.0, 0.0],
-        ], [
+        ],
+        [
             [1.0, 0.0, 0.0, 1.5],
             [0.0, 1.0, 0.0, 1.1],
             [0.0, 0.0, 1.0, 0.0],
         ],
     ];
-    let instances = transforms.into_iter().enumerate().map(|(i, transform)| {
-        AccelerationStructureInstance {
+    let instances = transforms
+        .into_iter()
+        .enumerate()
+        .map(|(i, transform)| AccelerationStructureInstance {
             transform,
             instance_custom_index_and_mask: Packed24_8::new(i as _, 0xff),
             instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
-                0, GeometryInstanceFlags::TRIANGLE_FACING_CULL_DISABLE.into()),
-            acceleration_structure_reference: bottom_level_acceleration_structure.device_address().get(),
-        }
-    })
-    .collect::<Vec<_>>();
+                0,
+                GeometryInstanceFlags::TRIANGLE_FACING_CULL_DISABLE.into(),
+            ),
+            acceleration_structure_reference: bottom_level_acceleration_structure
+                .device_address()
+                .get(),
+        })
+        .collect::<Vec<_>>();
 
     let instance_count = instances.len();
 
