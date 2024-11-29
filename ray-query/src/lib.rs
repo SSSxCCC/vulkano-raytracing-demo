@@ -246,7 +246,7 @@ fn draw_image(
     let command_buffer_allocator =
         StandardCommandBufferAllocator::new(context.device().clone(), Default::default());
 
-    let top_level_acceleration_structure = {
+    let (top_level_acceleration_structure, gpu_future) = {
         #[derive(BufferContents, Vertex)]
         #[repr(C)]
         struct Vertex {
@@ -282,20 +282,25 @@ fn draw_image(
         )
         .unwrap();
 
-        let bottom_level_acceleration_structure = create_bottom_level_acceleration_structure(
-            context.memory_allocator().clone(),
-            &command_buffer_allocator,
-            context.graphics_queue().clone(),
-            &[&vertex_buffer],
-        );
-        let top_level_acceleration_structure = create_top_level_acceleration_structure(
-            context.memory_allocator().clone(),
-            &command_buffer_allocator,
-            context.graphics_queue().clone(),
-            &[&bottom_level_acceleration_structure],
-        );
+        let (bottom_level_acceleration_structure, bla_future) =
+            create_bottom_level_acceleration_structure(
+                context.memory_allocator().clone(),
+                &command_buffer_allocator,
+                context.graphics_queue().clone(),
+                &[&vertex_buffer],
+            );
+        let (top_level_acceleration_structure, tla_future) =
+            create_top_level_acceleration_structure(
+                context.memory_allocator().clone(),
+                &command_buffer_allocator,
+                context.graphics_queue().clone(),
+                &[&bottom_level_acceleration_structure],
+            );
 
-        top_level_acceleration_structure
+        (
+            top_level_acceleration_structure,
+            gpu_future.join(bla_future).join(tla_future),
+        )
     };
 
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
@@ -358,7 +363,7 @@ fn create_bottom_level_acceleration_structure<T: BufferContents + Vertex>(
     command_buffer_allocator: &StandardCommandBufferAllocator,
     queue: Arc<Queue>,
     vertex_buffers: &[&Subbuffer<[T]>],
-) -> Arc<AccelerationStructure> {
+) -> (Arc<AccelerationStructure>, Box<dyn GpuFuture>) {
     let description = T::per_vertex();
 
     assert_eq!(description.stride, std::mem::size_of::<T>() as u32);
@@ -412,7 +417,7 @@ fn create_top_level_acceleration_structure(
     command_buffer_allocator: &StandardCommandBufferAllocator,
     queue: Arc<Queue>,
     bottom_level_acceleration_structures: &[&AccelerationStructure],
-) -> Arc<AccelerationStructure> {
+) -> (Arc<AccelerationStructure>, Box<dyn GpuFuture>) {
     let instances = bottom_level_acceleration_structures
         .iter()
         .map(
@@ -485,7 +490,7 @@ fn build_acceleration_structure(
     mut build_info: AccelerationStructureBuildGeometryInfo,
     max_primitive_counts: &[u32],
     build_range_infos: impl IntoIterator<Item = AccelerationStructureBuildRangeInfo>,
-) -> Arc<AccelerationStructure> {
+) -> (Arc<AccelerationStructure>, Box<dyn GpuFuture>) {
     let device = memory_allocator.device();
 
     let AccelerationStructureBuildSizesInfo {
@@ -521,15 +526,9 @@ fn build_acceleration_structure(
     }
 
     let command_buffer = builder.build().unwrap();
-    command_buffer
-        .execute(queue)
-        .unwrap()
-        .then_signal_fence_and_flush()
-        .unwrap()
-        .wait(None)
-        .unwrap();
+    let gpu_future = command_buffer.execute(queue).unwrap().boxed();
 
-    acceleration_structure
+    (acceleration_structure, gpu_future)
 }
 
 fn create_acceleration_structure(
