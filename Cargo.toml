@@ -1,10 +1,9 @@
 [workspace]
+resolver = "2"
 members = [
 	"minimal",
-	"minimal-shader",
-	"weekend",
-	"weekend-shader",
 	"shapes",
-	"shapes-shader",
+	"weekend",
 	"ray-query",
+	"raytracing-util",
 ]

@@ -1,15 +1,7 @@
+use glam::Affine3A;
 use std::sync::Arc;
 use vulkano::{
-    acceleration_structure::{
-        AccelerationStructure, AccelerationStructureBuildGeometryInfo,
-        AccelerationStructureBuildRangeInfo, AccelerationStructureBuildSizesInfo,
-        AccelerationStructureBuildType, AccelerationStructureCreateInfo,
-        AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData,
-        AccelerationStructureGeometryInstancesDataType, AccelerationStructureGeometryTrianglesData,
-        AccelerationStructureInstance, AccelerationStructureType, BuildAccelerationStructureFlags,
-        BuildAccelerationStructureMode, GeometryFlags, GeometryInstanceFlags,
-    },
-    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
+    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage},
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
         PrimaryCommandBufferAbstract, RenderingAttachmentInfo, RenderingInfo,
@@ -18,9 +10,8 @@ use vulkano::{
         allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
         PersistentDescriptorSet, WriteDescriptorSet,
     },
-    device::Queue,
     image::{view::ImageView, ImageUsage},
-    memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter},
+    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::{
         graphics::{
             color_blend::{ColorBlendAttachmentState, ColorBlendState},
@@ -38,7 +29,6 @@ use vulkano::{
     },
     render_pass::AttachmentStoreOp,
     sync::GpuFuture,
-    DeviceSize, Packed24_8,
 };
 use vulkano_util::{
     context::{VulkanoConfig, VulkanoContext},
@@ -54,6 +44,12 @@ use winit::{
 struct MyVertex {
     #[format(R32G32_SFLOAT)]
     position: [f32; 2],
+}
+
+impl From<[f32; 2]> for MyVertex {
+    fn from(value: [f32; 2]) -> Self {
+        MyVertex { position: value }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -131,9 +127,10 @@ fn _main(event_loop: EventLoop<()>) {
         },
         Event::RedrawRequested(_) => {
             if let Some(renderer) = windows.get_primary_renderer_mut() {
-                let gpu_future = renderer.acquire().unwrap();
-                let gpu_future = draw_image(&context, renderer.swapchain_image_view(), gpu_future); // TODO: use GpuFuture
-                renderer.present(gpu_future, true);
+                let acquire_future = renderer.acquire().unwrap();
+                let draw_future =
+                    draw_image(&context, renderer.swapchain_image_view(), acquire_future);
+                renderer.present(draw_future, true);
             }
         }
         Event::MainEventsCleared => {
@@ -148,28 +145,16 @@ fn _main(event_loop: EventLoop<()>) {
 fn draw_image(
     context: &VulkanoContext,
     image_view: Arc<ImageView>,
-    gpu_future: Box<dyn GpuFuture>,
+    before_future: Box<dyn GpuFuture>,
 ) -> Box<dyn GpuFuture> {
     // The quad buffer that covers the entire surface
-    let quad = [
-        MyVertex {
-            position: [-1.0, -1.0],
-        },
-        MyVertex {
-            position: [-1.0, 1.0],
-        },
-        MyVertex {
-            position: [1.0, -1.0],
-        },
-        MyVertex {
-            position: [1.0, 1.0],
-        },
-        MyVertex {
-            position: [1.0, -1.0],
-        },
-        MyVertex {
-            position: [-1.0, 1.0],
-        },
+    let quad: [MyVertex; 6] = [
+        [-1.0, -1.0].into(),
+        [-1.0, 1.0].into(),
+        [1.0, -1.0].into(),
+        [1.0, 1.0].into(),
+        [1.0, -1.0].into(),
+        [-1.0, 1.0].into(),
     ];
     let quad_buffer = Buffer::from_iter(
         context.memory_allocator().clone(),
@@ -246,61 +231,29 @@ fn draw_image(
     let command_buffer_allocator =
         StandardCommandBufferAllocator::new(context.device().clone(), Default::default());
 
-    let (top_level_acceleration_structure, gpu_future) = {
-        #[derive(BufferContents, Vertex)]
-        #[repr(C)]
-        struct Vertex {
-            #[format(R32G32B32_SFLOAT)]
-            position: [f32; 3],
-        }
-
-        let vertices = [
-            Vertex {
-                position: [-0.5, -0.25, 1.0],
-            },
-            Vertex {
-                position: [0.0, 0.5, 1.0],
-            },
-            Vertex {
-                position: [0.25, -0.1, 1.0],
-            },
+    let (tlas, before_future) = {
+        let vertices = vec![
+            [-0.5, -0.25, 1.0].into(),
+            [0.0, 0.5, 1.0].into(),
+            [0.25, -0.1, 1.0].into(),
         ];
+        let (blas, blas_future) =
+            raytracing_util::vulkano::create_triangle_bottom_level_acceleration_structure(
+                context.memory_allocator().clone(),
+                &command_buffer_allocator,
+                context.graphics_queue().clone(),
+                vec![(vertices, None)],
+            );
 
-        let vertex_buffer = Buffer::from_iter(
+        let instances = vec![(blas, 0, vec![Affine3A::IDENTITY])];
+        let (tlas, tlas_future) = raytracing_util::vulkano::create_top_level_acceleration_structure(
             context.memory_allocator().clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY
-                    | BufferUsage::SHADER_DEVICE_ADDRESS,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices,
-        )
-        .unwrap();
+            &command_buffer_allocator,
+            context.graphics_queue().clone(),
+            instances,
+        );
 
-        let (bottom_level_acceleration_structure, bla_future) =
-            create_bottom_level_acceleration_structure(
-                context.memory_allocator().clone(),
-                &command_buffer_allocator,
-                context.graphics_queue().clone(),
-                &[&vertex_buffer],
-            );
-        let (top_level_acceleration_structure, tla_future) =
-            create_top_level_acceleration_structure(
-                context.memory_allocator().clone(),
-                &command_buffer_allocator,
-                context.graphics_queue().clone(),
-                &[&bottom_level_acceleration_structure],
-            );
-
-        (
-            top_level_acceleration_structure,
-            gpu_future.join(bla_future).join(tla_future),
-        )
+        (tlas, before_future.join(blas_future).join(tlas_future))
     };
 
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
@@ -311,10 +264,7 @@ fn draw_image(
     let descriptor_set = PersistentDescriptorSet::new(
         &descriptor_set_allocator,
         pipeline.layout().set_layouts().get(0).unwrap().clone(),
-        [WriteDescriptorSet::acceleration_structure(
-            0,
-            top_level_acceleration_structure,
-        )],
+        [WriteDescriptorSet::acceleration_structure(0, tlas)],
         [],
     )
     .unwrap();
@@ -353,239 +303,16 @@ fn draw_image(
         .unwrap();
     let command_buffer = builder.build().unwrap();
     command_buffer
-        .execute_after(gpu_future, context.graphics_queue().clone())
+        .execute_after(before_future, context.graphics_queue().clone())
         .unwrap()
         .boxed()
-}
-
-fn create_bottom_level_acceleration_structure<T: BufferContents + Vertex>(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    command_buffer_allocator: &StandardCommandBufferAllocator,
-    queue: Arc<Queue>,
-    vertex_buffers: &[&Subbuffer<[T]>],
-) -> (Arc<AccelerationStructure>, Box<dyn GpuFuture>) {
-    let description = T::per_vertex();
-
-    assert_eq!(description.stride, std::mem::size_of::<T>() as u32);
-
-    let mut triangles = vec![];
-    let mut max_primitive_counts = vec![];
-    let mut build_range_infos = vec![];
-
-    for &vertex_buffer in vertex_buffers {
-        let primitive_count = vertex_buffer.len() as u32 / 3;
-        triangles.push(AccelerationStructureGeometryTrianglesData {
-            flags: GeometryFlags::OPAQUE,
-            vertex_data: Some(vertex_buffer.clone().into_bytes()),
-            vertex_stride: description.stride,
-            max_vertex: vertex_buffer.len() as _,
-            index_data: None,
-            transform_data: None,
-            ..AccelerationStructureGeometryTrianglesData::new(
-                description.members.get("position").unwrap().format,
-            )
-        });
-        max_primitive_counts.push(primitive_count);
-        build_range_infos.push(AccelerationStructureBuildRangeInfo {
-            primitive_count,
-            primitive_offset: 0,
-            first_vertex: 0,
-            transform_offset: 0,
-        })
-    }
-
-    let geometries = AccelerationStructureGeometries::Triangles(triangles);
-    let build_info = AccelerationStructureBuildGeometryInfo {
-        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
-        mode: BuildAccelerationStructureMode::Build,
-        ..AccelerationStructureBuildGeometryInfo::new(geometries)
-    };
-
-    build_acceleration_structure(
-        memory_allocator,
-        command_buffer_allocator,
-        queue,
-        AccelerationStructureType::BottomLevel,
-        build_info,
-        &max_primitive_counts,
-        build_range_infos,
-    )
-}
-
-fn create_top_level_acceleration_structure(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    command_buffer_allocator: &StandardCommandBufferAllocator,
-    queue: Arc<Queue>,
-    bottom_level_acceleration_structures: &[&AccelerationStructure],
-) -> (Arc<AccelerationStructure>, Box<dyn GpuFuture>) {
-    let instances = bottom_level_acceleration_structures
-        .iter()
-        .map(
-            |&bottom_level_acceleration_structure| AccelerationStructureInstance {
-                instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
-                    0,
-                    GeometryInstanceFlags::TRIANGLE_FACING_CULL_DISABLE.into(),
-                ),
-                acceleration_structure_reference: bottom_level_acceleration_structure
-                    .device_address()
-                    .get(),
-                ..Default::default()
-            },
-        )
-        .collect::<Vec<_>>();
-
-    let values = Buffer::from_iter(
-        memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY
-                | BufferUsage::SHADER_DEVICE_ADDRESS,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        },
-        instances,
-    )
-    .unwrap();
-
-    let geometries =
-        AccelerationStructureGeometries::Instances(AccelerationStructureGeometryInstancesData {
-            flags: GeometryFlags::OPAQUE,
-            ..AccelerationStructureGeometryInstancesData::new(
-                AccelerationStructureGeometryInstancesDataType::Values(Some(values)),
-            )
-        });
-
-    let build_info = AccelerationStructureBuildGeometryInfo {
-        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
-        mode: BuildAccelerationStructureMode::Build,
-        ..AccelerationStructureBuildGeometryInfo::new(geometries)
-    };
-
-    let build_range_infos = [AccelerationStructureBuildRangeInfo {
-        primitive_count: bottom_level_acceleration_structures.len() as _,
-        primitive_offset: 0,
-        first_vertex: 0,
-        transform_offset: 0,
-    }];
-
-    build_acceleration_structure(
-        memory_allocator,
-        command_buffer_allocator,
-        queue,
-        AccelerationStructureType::TopLevel,
-        build_info,
-        &[bottom_level_acceleration_structures.len() as u32],
-        build_range_infos,
-    )
-}
-
-fn build_acceleration_structure(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    command_buffer_allocator: &StandardCommandBufferAllocator,
-    queue: Arc<Queue>,
-    ty: AccelerationStructureType,
-    mut build_info: AccelerationStructureBuildGeometryInfo,
-    max_primitive_counts: &[u32],
-    build_range_infos: impl IntoIterator<Item = AccelerationStructureBuildRangeInfo>,
-) -> (Arc<AccelerationStructure>, Box<dyn GpuFuture>) {
-    let device = memory_allocator.device();
-
-    let AccelerationStructureBuildSizesInfo {
-        acceleration_structure_size,
-        build_scratch_size,
-        ..
-    } = device
-        .acceleration_structure_build_sizes(
-            AccelerationStructureBuildType::Device,
-            &build_info,
-            max_primitive_counts,
-        )
-        .unwrap();
-
-    let acceleration_structure =
-        create_acceleration_structure(memory_allocator.clone(), ty, acceleration_structure_size);
-    let scratch_buffer = create_scratch_buffer(memory_allocator, build_scratch_size);
-
-    build_info.dst_acceleration_structure = Some(acceleration_structure.clone());
-    build_info.scratch_data = Some(scratch_buffer);
-
-    let mut builder = AutoCommandBufferBuilder::primary(
-        command_buffer_allocator,
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )
-    .unwrap();
-
-    unsafe {
-        builder
-            .build_acceleration_structure(build_info, build_range_infos.into_iter().collect())
-            .unwrap();
-    }
-
-    let command_buffer = builder.build().unwrap();
-    let gpu_future = command_buffer.execute(queue).unwrap().boxed();
-
-    (acceleration_structure, gpu_future)
-}
-
-fn create_acceleration_structure(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    ty: AccelerationStructureType,
-    size: DeviceSize,
-) -> Arc<AccelerationStructure> {
-    let buffer = Buffer::new_slice::<u8>(
-        memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-            ..Default::default()
-        },
-        size,
-    )
-    .unwrap();
-
-    unsafe {
-        AccelerationStructure::new(
-            memory_allocator.device().clone(),
-            AccelerationStructureCreateInfo {
-                ty,
-                ..AccelerationStructureCreateInfo::new(buffer)
-            },
-        )
-        .unwrap()
-    }
-}
-
-fn create_scratch_buffer(
-    memory_allocator: Arc<dyn MemoryAllocator>,
-    size: DeviceSize,
-) -> Subbuffer<[u8]> {
-    Buffer::new_slice::<u8>(
-        memory_allocator,
-        BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER | BufferUsage::SHADER_DEVICE_ADDRESS,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-            ..Default::default()
-        },
-        size,
-    )
-    .unwrap()
 }
 
 mod vs {
     vulkano_shaders::shader! {
         ty: "vertex",
         src: r"
-            #version 450
+            #version 460
             layout(location = 0) in vec2 position;
             layout(location = 0) out vec2 out_uv;
             void main() {
