@@ -98,7 +98,7 @@ fn _main(event_loop: EventLoop<()>) {
                 &WindowDescriptor::default(),
                 |info| {
                     //info.image_format = Some(Format::R8G8B8A8_UNORM);
-                    info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
+                    info.image_usage |= ImageUsage::STORAGE;
                 },
             );
         }

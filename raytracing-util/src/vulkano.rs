@@ -1,4 +1,3 @@
-use crate::affine3a_to_rows_array_2d;
 use glam::{Affine3A, Vec3};
 use std::sync::Arc;
 use vulkano::{
@@ -243,7 +242,7 @@ pub fn create_top_level_acceleration_structure(
         .enumerate()
         .map(
             |(i, (transform, sbt_index, blas_ref))| AccelerationStructureInstance {
-                transform: affine3a_to_rows_array_2d(transform),
+                transform: super::affine3a_to_rows_array_2d(transform),
                 instance_custom_index_and_mask: Packed24_8::new(i as _, 0xff),
                 instance_shader_binding_table_record_offset_and_flags: Packed24_8::new(
                     sbt_index,

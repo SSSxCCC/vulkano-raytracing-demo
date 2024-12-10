@@ -110,7 +110,7 @@ fn _main(event_loop: EventLoop<()>) {
                 &WindowDescriptor::default(),
                 |info| {
                     //info.image_format = Some(Format::R32G32B32A32_SFLOAT);
-                    info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
+                    info.image_usage |= ImageUsage::STORAGE;
                 },
             );
         }
@@ -458,11 +458,10 @@ mod raygen {
                 uint state;
             };
 
-            const uint PCG_DEFAULT_MULTIPLIER_32 = 747796405u;
-            const uint PCG_DEFAULT_INCREMENT_32 = 2891336453u;
-
             // Step function for PCG32
             void pcg_oneseq_32_step_r(inout PCG32si rng) {
+                const uint PCG_DEFAULT_MULTIPLIER_32 = 747796405u;
+                const uint PCG_DEFAULT_INCREMENT_32 = 2891336453u;
                 rng.state = (rng.state * PCG_DEFAULT_MULTIPLIER_32 + PCG_DEFAULT_INCREMENT_32);
             }
 
@@ -510,15 +509,19 @@ mod raygen {
             #define PI 3.1415926538
 
             vec3 random_in_unit_sphere(inout PCG32si rng) {
-                vec3 v;
-                do {
-                    v = vec3(
-                        next_f32_range(rng, -1.0, 1.0),
-                        next_f32_range(rng, -1.0, 1.0),
-                        next_f32_range(rng, -1.0, 1.0)
-                    );
-                } while (dot(v, v) >= 1.0);
-                return v;
+                // Generate random spherical coordinates (direction)
+                float theta = next_f32_range(rng, 0.0, 2.0 * PI);  // Uniform azimuthal angle
+                float phi = next_f32_range(rng, -1.0, 1.0);        // Uniform cosine of polar angle
+
+                // Sample radius as the cube root of a uniform random value to ensure uniform distribution in volume
+                float r = pow(next_f32(rng), 1.0 / 3.0);  // Cube root of a uniform random number in [0, 1]
+
+                // Convert spherical coordinates (r, theta, phi) to Cartesian coordinates
+                float x = r * sqrt(1.0 - phi * phi) * cos(theta);
+                float y = r * sqrt(1.0 - phi * phi) * sin(theta);
+                float z = r * phi;
+
+                return vec3(x, y, z);
             }
 
             vec3 random_in_hemisphere(vec3 normal, inout PCG32si rng) {
@@ -531,47 +534,18 @@ mod raygen {
             }
 
             vec3 random_in_unit_disk(inout PCG32si rng) {
-                vec3 p;
-                do {
-                    p = vec3(
-                        next_f32_range(rng, -1.0, 1.0),
-                        next_f32_range(rng, -1.0, 1.0),
-                        0.0
-                    );
-                } while (dot(p, p) >= 1.0);
-                return p;
-            }
+                // Generate random angle between 0 and 2π
+                float theta = next_f32_range(rng, 0.0, 2.0 * PI);
 
-            vec3 random_cosine_direction(inout PCG32si rng) {
-                float r1 = next_f32(rng);
-                float r2 = next_f32(rng);
-                float z = sqrt(1.0 - r2);
-                float phi = 2.0 * PI * r1;
-                float x = cos(phi) * sqrt(r2);
-                float y = sin(phi) * sqrt(r2);
-                return vec3(x, y, z);
-            }
+                // Generate random radius squared between 0 and 1, then take the square root to make it uniform in area
+                float r2 = next_f32(rng);  // Uniformly sample r^2 (radius squared)
+                float r = sqrt(r2);        // Take square root to get radius
 
-            vec3 random_to_sphere(float radius, float distance_squared, inout PCG32si rng) {
-                float r1 = next_f32(rng);
-                float r2 = next_f32(rng);
-                float z = 1.0 + r2 * (sqrt(1.0 - radius * radius / distance_squared) - 1.0);
-                float phi = 2.0 * PI * r1;
-                float x = cos(phi) * sqrt(1.0 - z * z);
-                float y = sin(phi) * sqrt(1.0 - z * z);
-                return vec3(x, y, z);
-            }
+                // Convert polar coordinates to Cartesian coordinates
+                float x = r * cos(theta);
+                float y = r * sin(theta);
 
-            vec2 sphere_uv(vec3 point) {
-                float theta = acos(-point.y);
-                float phi = atan(point.x, -point.z) + PI;
-                return vec2(phi / (2.0 * PI), theta / PI);
-            }
-
-            // Function to check if a vector is near zero
-            bool is_near_zero(vec3 v) {
-                const float S = 1e-8;
-                return (abs(v.x) < S) && (abs(v.y) < S) && (abs(v.z) < S);
+                return vec3(x, y, 0.0);
             }
 
             // =============== Ray and Payload structs ===============
@@ -582,10 +556,7 @@ mod raygen {
             };
 
             Ray default_Ray() {
-                Ray ray;
-                ray.origin = vec3(0.0);
-                ray.direction = vec3(0.0);
-                return ray;
+                return Ray(vec3(0.0), vec3(0.0));
             }
 
             struct RayPayload {
@@ -608,18 +579,6 @@ mod raygen {
 
             // =============== Materials ===============
 
-            //vec3 reflect(vec3 v, vec3 n) {
-            //    return v - 2.0 * dot(v, n) * n;
-            //}
-
-            //vec3 refract(vec3 uv, vec3 n, float etai_over_etat) {
-            //    float cos_theta = -dot(uv, n);
-            //    cos_theta = min(cos_theta, 1.0);
-            //    vec3 r_out_perp = etai_over_etat * (uv + cos_theta * n);
-            //    vec3 r_out_parallel = -sqrt(abs(1.0 - dot(r_out_perp, r_out_perp))) * n;
-            //    return r_out_perp + r_out_parallel;
-            //}
-
             float reflectance(float cosine, float ref_idx) {
                 float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
                 r0 = r0 * r0;
@@ -632,10 +591,7 @@ mod raygen {
             };
 
             Scatter default_Scatter() {
-                Scatter scatter;
-                scatter.color = vec3(0.0);
-                scatter.ray = default_Ray();
-                return scatter;
+                return Scatter(vec3(0.0), default_Ray());
             }
 
             // Materials

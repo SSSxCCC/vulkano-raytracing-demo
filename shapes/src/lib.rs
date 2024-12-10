@@ -73,7 +73,7 @@ fn _main(event_loop: EventLoop<()>) {
                 &WindowDescriptor::default(),
                 |info| {
                     //info.image_format = Some(Format::R32G32B32A32_SFLOAT);
-                    info.image_usage = ImageUsage::COLOR_ATTACHMENT | ImageUsage::STORAGE;
+                    info.image_usage |= ImageUsage::STORAGE;
                 },
             );
         }
