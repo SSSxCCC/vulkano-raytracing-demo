@@ -143,6 +143,7 @@ impl ApplicationHandler for Application {
         }
     }
 }
+
 struct DrawContext {
     pipeline: Arc<RayTracingPipeline>,
     pipeline_layout: Arc<PipelineLayout>,
@@ -276,6 +277,7 @@ fn draw_image(
         CommandBufferUsage::OneTimeSubmit,
     )
     .unwrap();
+
     builder
         .bind_pipeline_ray_tracing(draw_context.pipeline.clone())
         .unwrap()
