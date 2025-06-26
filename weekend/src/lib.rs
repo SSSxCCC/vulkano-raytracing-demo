@@ -1,31 +1,33 @@
-use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::{vec3, Affine3A, Quat, Vec3};
 use rand::prelude::*;
-use raytracing_util::{
-    ash::{AshBuffer, AshPipeline, SbtRegion, ShaderGroup},
-    RenderContext,
-};
+use raytracing_util::RenderContext;
 use std::sync::Arc;
 use vulkano::{
     acceleration_structure::AabbPositions,
     buffer::{Buffer, BufferCreateInfo, BufferUsage},
     command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryCommandBufferAbstract},
-    descriptor_set::{layout::DescriptorSetLayout, PersistentDescriptorSet, WriteDescriptorSet},
-    device::Device,
+    descriptor_set::{layout::DescriptorSetLayout, DescriptorSet, WriteDescriptorSet},
     image::{view::ImageView, ImageUsage},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
-    pipeline::{layout::PipelineDescriptorSetLayoutCreateInfo, PipelineLayout},
+    pipeline::{
+        layout::PipelineDescriptorSetLayoutCreateInfo,
+        ray_tracing::{
+            RayTracingPipeline, RayTracingPipelineCreateInfo, RayTracingShaderGroupCreateInfo,
+            ShaderBindingTable,
+        },
+        PipelineBindPoint, PipelineLayout,
+    },
     sync::GpuFuture,
-    VulkanObject,
 };
 use vulkano_util::{
     context::{VulkanoConfig, VulkanoContext},
     window::{VulkanoWindows, WindowDescriptor},
 };
 use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ControlFlow, EventLoop},
 };
 
 #[derive(Clone, Copy, Default, Zeroable, Pod)]
@@ -63,7 +65,7 @@ impl EnumMaterialPod {
 }
 
 #[cfg(target_os = "android")]
-use winit::platform::android::activity::AndroidApp;
+use winit::platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid};
 
 #[cfg(target_os = "android")]
 #[no_mangle]
@@ -71,8 +73,7 @@ fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
     );
-    use winit::platform::android::EventLoopBuilderExtAndroid;
-    let event_loop = EventLoopBuilder::new().with_android_app(app).build();
+    let event_loop = EventLoop::builder().with_android_app(app).build().unwrap();
     _main(event_loop);
 }
 
@@ -83,11 +84,13 @@ fn main() {
         .filter_level(log::LevelFilter::Trace)
         .parse_default_env()
         .init();
-    let event_loop = EventLoopBuilder::new().build();
+    let event_loop = EventLoop::new().unwrap();
     _main(event_loop);
 }
 
 fn _main(event_loop: EventLoop<()>) {
+    event_loop.set_control_flow(ControlFlow::Poll);
+
     let mut config = VulkanoConfig::default();
     config.device_extensions.khr_deferred_host_operations = true;
     config.device_extensions.khr_acceleration_structure = true;
@@ -98,144 +101,150 @@ fn _main(event_loop: EventLoop<()>) {
     let vulkano = VulkanoContext::new(config);
     let context = RenderContext::new(vulkano);
     let draw_context = DrawContext::new(&context);
-    let mut windows = VulkanoWindows::default();
-    let scene = sample_scene();
+    let windows = VulkanoWindows::default();
+    let mut application = Application {
+        context,
+        draw_context,
+        windows,
+    };
 
-    event_loop.run(move |event, event_loop, control_flow| match event {
-        Event::Resumed => {
-            log::debug!("Event::Resumed");
-            windows.create_window(
-                &event_loop,
-                context.vulkano(),
-                &WindowDescriptor::default(),
-                |info| {
-                    //info.image_format = Some(Format::R32G32B32A32_SFLOAT);
-                    info.image_usage |= ImageUsage::STORAGE;
-                },
-            );
-        }
-        Event::Suspended => {
-            log::debug!("Event::Suspended");
-            windows.remove_renderer(windows.primary_window_id().unwrap());
-        }
-        Event::WindowEvent { event, .. } => match event {
+    log::warn!("Vulkano start main loop!");
+    event_loop.run_app(&mut application).unwrap();
+}
+
+struct Application {
+    context: RenderContext,
+    draw_context: DrawContext,
+    windows: VulkanoWindows,
+}
+
+impl ApplicationHandler for Application {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        log::debug!("Resumed");
+        self.windows.create_window(
+            &event_loop,
+            &self.context,
+            &WindowDescriptor::default(),
+            |info| {
+                //info.image_format = Some(Format::R32G32B32A32_SFLOAT);
+                info.image_usage |= ImageUsage::STORAGE;
+            },
+        );
+    }
+
+    fn suspended(&mut self, _: &winit::event_loop::ActiveEventLoop) {
+        log::debug!("Suspended");
+        self.windows
+            .remove_renderer(self.windows.primary_window_id().unwrap());
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
             WindowEvent::CloseRequested => {
                 log::debug!("WindowEvent::CloseRequested");
-                *control_flow = ControlFlow::Exit;
+                event_loop.exit();
             }
             WindowEvent::Resized(_) => {
                 log::debug!("WindowEvent::Resized");
-                if let Some(renderer) = windows.get_primary_renderer_mut() {
-                    renderer.resize()
+                if let Some(renderer) = self.windows.get_primary_renderer_mut() {
+                    renderer.resize();
+                    renderer.window().request_redraw();
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 log::debug!("WindowEvent::ScaleFactorChanged");
-                if let Some(renderer) = windows.get_primary_renderer_mut() {
-                    renderer.resize()
+                if let Some(renderer) = self.windows.get_primary_renderer_mut() {
+                    renderer.resize();
+                    renderer.window().request_redraw();
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                log::trace!("WindowEvent::RedrawRequested");
+                if let Some(renderer) = self.windows.get_primary_renderer_mut() {
+                    let acquire_future = renderer.acquire(None, |_| {}).unwrap();
+                    let draw_future = draw_image(
+                        &self.context,
+                        &self.draw_context,
+                        renderer.swapchain_image_view(),
+                        acquire_future,
+                    );
+                    renderer.present(draw_future, true);
                 }
             }
             _ => (),
-        },
-        Event::RedrawRequested(_) => {
-            if let Some(renderer) = windows.get_primary_renderer_mut() {
-                let acquire_future = renderer.acquire().unwrap();
-                let draw_future = draw_image(
-                    &context,
-                    &draw_context,
-                    renderer.swapchain_image_view(),
-                    acquire_future,
-                    scene.clone(),
-                );
-                renderer.present(draw_future, true);
-            }
         }
-        Event::MainEventsCleared => {
-            if let Some(renderer) = windows.get_primary_renderer() {
-                renderer.window().request_redraw()
-            }
-        }
-        _ => (),
-    });
+    }
 }
 
 struct DrawContext {
-    pipeline: AshPipeline,
+    pipeline: Arc<RayTracingPipeline>,
     pipeline_layout: Arc<PipelineLayout>,
     descriptor_set_layout: Arc<DescriptorSetLayout>,
-    #[allow(unused)]
-    sbt_buffer: AshBuffer,
-    sbt_region: SbtRegion,
-    #[allow(unused)]
-    device: Arc<Device>, // device must be destroyed after vk buffer
+    shader_binding_table: ShaderBindingTable,
+    scene: (Vec<Affine3A>, Vec<EnumMaterialPod>),
 }
 
 impl DrawContext {
     fn new(context: &RenderContext) -> Self {
-        let raygen_shader_module = raygen::load(context.vulkano().device().clone()).unwrap();
-        let miss_shader_module = miss::load(context.vulkano().device().clone()).unwrap();
+        let raygen_shader_module = raygen::load(context.device().clone()).unwrap();
+        let miss_shader_module = miss::load(context.device().clone()).unwrap();
         let sphere_intersection_shader_module =
-            sphere_intersection::load(context.vulkano().device().clone()).unwrap();
+            sphere_intersection::load(context.device().clone()).unwrap();
         let sphere_closesthit_shader_module =
-            sphere_closesthit::load(context.vulkano().device().clone()).unwrap();
+            sphere_closesthit::load(context.device().clone()).unwrap();
 
-        let (shader_stages, stages) = raytracing_util::create_shader_stages([
+        let stages = raytracing_util::create_shader_stages([
             raygen_shader_module,
             miss_shader_module,
             sphere_intersection_shader_module,
             sphere_closesthit_shader_module,
         ]);
 
-        let shader_groups = raytracing_util::ash::create_shader_groups([
-            ShaderGroup::General(0),
-            ShaderGroup::General(1),
-            ShaderGroup::ProceduralHitGroup {
-                closest_hit_shader: 3,
-                any_hit_shader: vk::SHADER_UNUSED_KHR,
+        let groups = [
+            RayTracingShaderGroupCreateInfo::General { general_shader: 0 },
+            RayTracingShaderGroupCreateInfo::General { general_shader: 1 },
+            RayTracingShaderGroupCreateInfo::ProceduralHit {
+                closest_hit_shader: Some(3),
+                any_hit_shader: None,
                 intersection_shader: 2,
             },
-        ]);
+        ];
 
         let pipeline_layout = PipelineLayout::new(
-            context.vulkano().device().clone(),
+            context.device().clone(),
             PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(context.vulkano().device().clone())
+                .into_pipeline_layout_create_info(context.device().clone())
                 .unwrap(),
         )
         .unwrap();
         let descriptor_set_layout = pipeline_layout.set_layouts()[0].clone();
 
-        let pipeline = AshPipeline::new(
-            unsafe {
-                context.ash().rt_pipeline().create_ray_tracing_pipelines(
-                    vk::DeferredOperationKHR::null(),
-                    vk::PipelineCache::null(),
-                    &[vk::RayTracingPipelineCreateInfoKHR::builder()
-                        .stages(&shader_stages)
-                        .groups(&shader_groups)
-                        .max_pipeline_ray_recursion_depth(1)
-                        .layout(pipeline_layout.handle())
-                        .build()],
-                    None,
-                )
-            }
-            .unwrap()[0],
-            context.ash().device().clone(),
-        );
+        let pipeline = RayTracingPipeline::new(
+            context.device().clone(),
+            None,
+            RayTracingPipelineCreateInfo {
+                stages: stages.into_iter().collect(),
+                groups: groups.into_iter().collect(),
+                max_pipeline_ray_recursion_depth: 1,
+                ..RayTracingPipelineCreateInfo::layout(pipeline_layout.clone())
+            },
+        )
+        .unwrap();
 
-        let (sbt_buffer, sbt_region) = raytracing_util::ash::create_sbt_buffer_and_region(
-            context.ash(),
-            *pipeline,
-            shader_groups.len(),
-        );
+        let shader_binding_table =
+            ShaderBindingTable::new(context.memory_allocator().clone(), &pipeline).unwrap();
 
         DrawContext {
             pipeline,
             pipeline_layout,
             descriptor_set_layout,
-            sbt_buffer,
-            sbt_region,
-            device: context.vulkano().device().clone(),
+            shader_binding_table,
+            scene: sample_scene(),
         }
     }
 }
@@ -245,32 +254,30 @@ fn draw_image(
     draw_context: &DrawContext,
     image_view: Arc<ImageView>,
     before_future: Box<dyn GpuFuture>,
-    scene: (Vec<Affine3A>, Vec<EnumMaterialPod>),
 ) -> Box<dyn GpuFuture> {
     // acceleration structures
-    let (blas, blas_future) =
-        raytracing_util::vulkano::create_aabb_bottom_level_acceleration_structure(
-            context.vulkano().memory_allocator().clone(),
-            context.vulkano_ext().command_buffer_allocator(),
-            context.vulkano().graphics_queue().clone(),
-            vec![AabbPositions {
-                min: [-1.0, -1.0, -1.0],
-                max: [1.0, 1.0, 1.0],
-            }],
-        );
+    let (blas, blas_future) = raytracing_util::create_aabb_bottom_level_acceleration_structure(
+        context.memory_allocator().clone(),
+        context.command_buffer_allocator().clone(),
+        context.graphics_queue().clone(),
+        vec![AabbPositions {
+            min: [-1.0, -1.0, -1.0],
+            max: [1.0, 1.0, 1.0],
+        }],
+    );
 
-    let (sphere_instances, materials) = scene;
-    let (tlas, tlas_future) = raytracing_util::vulkano::create_top_level_acceleration_structure(
-        context.vulkano().memory_allocator().clone(),
-        context.vulkano_ext().command_buffer_allocator(),
-        context.vulkano().graphics_queue().clone(),
+    let (sphere_instances, materials) = draw_context.scene.clone();
+    let (tlas, tlas_future) = raytracing_util::create_top_level_acceleration_structure(
+        context.memory_allocator().clone(),
+        context.command_buffer_allocator().clone(),
+        context.graphics_queue().clone(),
         vec![(blas, 0, sphere_instances)],
     );
 
     let before_future = before_future.join(blas_future).join(tlas_future);
 
     let material_buffer = Buffer::from_iter(
-        context.vulkano().memory_allocator().clone(),
+        context.memory_allocator().clone(),
         BufferCreateInfo {
             usage: BufferUsage::STORAGE_BUFFER,
             ..Default::default()
@@ -284,8 +291,8 @@ fn draw_image(
     )
     .unwrap();
 
-    let descriptor_set = PersistentDescriptorSet::new(
-        context.vulkano_ext().descriptor_set_allocator(),
+    let descriptor_set = DescriptorSet::new(
+        context.descriptor_set_allocator().clone(),
         draw_context.descriptor_set_layout.clone(),
         [
             WriteDescriptorSet::acceleration_structure(0, tlas),
@@ -298,66 +305,38 @@ fn draw_image(
 
     let mut rng = StdRng::from_entropy();
 
-    let command_buffer = AutoCommandBufferBuilder::primary(
-        context.vulkano_ext().command_buffer_allocator(),
-        context.vulkano().graphics_queue().queue_family_index(),
+    let mut builder = AutoCommandBufferBuilder::primary(
+        context.command_buffer_allocator().clone(),
+        context.graphics_queue().queue_family_index(),
         CommandBufferUsage::OneTimeSubmit,
     )
-    .unwrap()
-    .build()
     .unwrap();
 
-    let command_buffer_handle = command_buffer.handle();
-    unsafe {
-        context
-            .ash()
-            .device()
-            .begin_command_buffer(
-                command_buffer_handle,
-                &vk::CommandBufferBeginInfo::builder()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-                    .build(),
-            )
-            .expect("Failed to begin recording Command Buffer at beginning!");
-        context.ash().device().cmd_bind_pipeline(
-            command_buffer_handle,
-            vk::PipelineBindPoint::RAY_TRACING_KHR,
-            *draw_context.pipeline,
-        );
-        context.ash().device().cmd_bind_descriptor_sets(
-            command_buffer_handle,
-            vk::PipelineBindPoint::RAY_TRACING_KHR,
-            draw_context.pipeline_layout.handle(),
+    builder
+        .bind_pipeline_ray_tracing(draw_context.pipeline.clone())
+        .unwrap()
+        .bind_descriptor_sets(
+            PipelineBindPoint::RayTracing,
+            draw_context.pipeline_layout.clone(),
             0,
-            &[descriptor_set.handle()],
-            &[],
-        );
-        context.ash().device().cmd_push_constants(
-            command_buffer_handle,
-            draw_context.pipeline_layout.handle(),
-            vk::ShaderStageFlags::RAYGEN_KHR,
-            0,
-            &rng.next_u32().to_le_bytes(),
-        );
-        context.ash().rt_pipeline().cmd_trace_rays(
-            command_buffer_handle,
-            &draw_context.sbt_region.raygen,
-            &draw_context.sbt_region.miss,
-            &draw_context.sbt_region.hit,
-            &draw_context.sbt_region.call,
-            image_view.image().extent()[0],
-            image_view.image().extent()[1],
-            1,
-        );
-        context
-            .ash()
-            .device()
-            .end_command_buffer(command_buffer_handle)
-            .unwrap();
-    }
+            vec![descriptor_set],
+        )
+        .unwrap()
+        .push_constants(draw_context.pipeline_layout.clone(), 0, rng.next_u32())
+        .unwrap();
 
-    command_buffer
-        .execute_after(before_future, context.vulkano().graphics_queue().clone())
+    unsafe {
+        builder.trace_rays(
+            draw_context.shader_binding_table.addresses().clone(),
+            image_view.image().extent(),
+        )
+    }
+    .unwrap();
+
+    builder
+        .build()
+        .unwrap()
+        .execute_after(before_future, context.graphics_queue().clone())
         .unwrap()
         .boxed()
 }
