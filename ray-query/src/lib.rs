@@ -8,7 +8,7 @@ use vulkano::{
     },
     descriptor_set::{
         allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
-        PersistentDescriptorSet, WriteDescriptorSet,
+        DescriptorSet, WriteDescriptorSet,
     },
     image::{view::ImageView, ImageUsage},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
@@ -35,8 +35,9 @@ use vulkano_util::{
     window::{VulkanoWindows, WindowDescriptor},
 };
 use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ControlFlow, EventLoop},
 };
 
 #[derive(BufferContents, Vertex)]
@@ -53,7 +54,7 @@ impl From<[f32; 2]> for MyVertex {
 }
 
 #[cfg(target_os = "android")]
-use winit::platform::android::activity::AndroidApp;
+use winit::platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid};
 
 #[cfg(target_os = "android")]
 #[no_mangle]
@@ -61,8 +62,7 @@ fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
     );
-    use winit::platform::android::EventLoopBuilderExtAndroid;
-    let event_loop = EventLoopBuilder::new().with_android_app(app).build();
+    let event_loop = EventLoop::builder().with_android_app(app).build().unwrap();
     _main(event_loop);
 }
 
@@ -73,11 +73,13 @@ fn main() {
         .filter_level(log::LevelFilter::Trace)
         .parse_default_env()
         .init();
-    let event_loop = EventLoopBuilder::new().build();
+    let event_loop = EventLoop::new().unwrap();
     _main(event_loop);
 }
 
 fn _main(event_loop: EventLoop<()>) {
+    event_loop.set_control_flow(ControlFlow::Poll);
+
     let mut config = VulkanoConfig::default();
     config.device_extensions.khr_deferred_host_operations = true;
     config.device_extensions.khr_acceleration_structure = true;
@@ -87,59 +89,78 @@ fn _main(event_loop: EventLoop<()>) {
     config.device_features.dynamic_rendering = true;
     config.device_features.buffer_device_address = true;
     let context = VulkanoContext::new(config);
-    let mut windows = VulkanoWindows::default();
+    let windows = VulkanoWindows::default();
+    let mut application = Application { context, windows };
 
-    event_loop.run(move |event, event_loop, control_flow| match event {
-        Event::Resumed => {
-            log::debug!("Event::Resumed");
-            windows.create_window(
-                &event_loop,
-                &context,
-                &WindowDescriptor::default(),
-                |info| {
-                    //info.image_format = Some(Format::R8G8B8A8_UNORM);
-                    info.image_usage |= ImageUsage::STORAGE;
-                },
-            );
-        }
-        Event::Suspended => {
-            log::debug!("Event::Suspended");
-            windows.remove_renderer(windows.primary_window_id().unwrap());
-        }
-        Event::WindowEvent { event, .. } => match event {
+    log::warn!("Vulkano start main loop!");
+    event_loop.run_app(&mut application).unwrap();
+}
+
+struct Application {
+    context: VulkanoContext,
+    windows: VulkanoWindows,
+}
+
+impl ApplicationHandler for Application {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        log::debug!("Resumed");
+        self.windows.create_window(
+            &event_loop,
+            &self.context,
+            &WindowDescriptor::default(),
+            |info| {
+                //info.image_format = Some(Format::R8G8B8A8_UNORM);
+                info.image_usage |= ImageUsage::STORAGE;
+            },
+        );
+    }
+
+    fn suspended(&mut self, _: &winit::event_loop::ActiveEventLoop) {
+        log::debug!("Suspended");
+        self.windows
+            .remove_renderer(self.windows.primary_window_id().unwrap());
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
             WindowEvent::CloseRequested => {
                 log::debug!("WindowEvent::CloseRequested");
-                *control_flow = ControlFlow::Exit;
+                event_loop.exit();
             }
             WindowEvent::Resized(_) => {
                 log::debug!("WindowEvent::Resized");
-                if let Some(renderer) = windows.get_primary_renderer_mut() {
-                    renderer.resize()
+                if let Some(renderer) = self.windows.get_primary_renderer_mut() {
+                    renderer.resize();
+                    renderer.window().request_redraw();
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 log::debug!("WindowEvent::ScaleFactorChanged");
-                if let Some(renderer) = windows.get_primary_renderer_mut() {
-                    renderer.resize()
+                if let Some(renderer) = self.windows.get_primary_renderer_mut() {
+                    renderer.resize();
+                    renderer.window().request_redraw();
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                log::trace!("WindowEvent::RedrawRequested");
+                if let Some(renderer) = self.windows.get_primary_renderer_mut() {
+                    let acquire_future = renderer.acquire(None, |_| {}).unwrap();
+                    let draw_future = draw_image(
+                        &self.context,
+                        renderer.swapchain_image_view(),
+                        acquire_future,
+                    );
+                    renderer.present(draw_future, true);
                 }
             }
             _ => (),
-        },
-        Event::RedrawRequested(_) => {
-            if let Some(renderer) = windows.get_primary_renderer_mut() {
-                let acquire_future = renderer.acquire().unwrap();
-                let draw_future =
-                    draw_image(&context, renderer.swapchain_image_view(), acquire_future);
-                renderer.present(draw_future, true);
-            }
         }
-        Event::MainEventsCleared => {
-            if let Some(renderer) = windows.get_primary_renderer() {
-                renderer.window().request_redraw()
-            }
-        }
-        _ => (),
-    });
+    }
 }
 
 fn draw_image(
@@ -180,9 +201,7 @@ fn draw_image(
             .unwrap()
             .entry_point("main")
             .unwrap();
-        let vertex_input_state = MyVertex::per_vertex()
-            .definition(&vs.info().input_interface)
-            .unwrap();
+        let vertex_input_state = MyVertex::per_vertex().definition(&vs).unwrap();
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),
             PipelineShaderStageCreateInfo::new(fs),
@@ -228,8 +247,10 @@ fn draw_image(
         depth_range: 0.0..=1.0,
     };
 
-    let command_buffer_allocator =
-        StandardCommandBufferAllocator::new(context.device().clone(), Default::default());
+    let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
+        context.device().clone(),
+        Default::default(),
+    ));
 
     let (tlas, before_future) = {
         let vertices = vec![
@@ -238,17 +259,17 @@ fn draw_image(
             [0.25, -0.1, 1.0].into(),
         ];
         let (blas, blas_future) =
-            raytracing_util::vulkano::create_triangle_bottom_level_acceleration_structure(
+            raytracing_util::create_triangle_bottom_level_acceleration_structure(
                 context.memory_allocator().clone(),
-                &command_buffer_allocator,
+                command_buffer_allocator.clone(),
                 context.graphics_queue().clone(),
                 vec![(vertices, None)],
             );
 
         let instances = vec![(blas, 0, vec![Affine3A::IDENTITY])];
-        let (tlas, tlas_future) = raytracing_util::vulkano::create_top_level_acceleration_structure(
+        let (tlas, tlas_future) = raytracing_util::create_top_level_acceleration_structure(
             context.memory_allocator().clone(),
-            &command_buffer_allocator,
+            command_buffer_allocator.clone(),
             context.graphics_queue().clone(),
             instances,
         );
@@ -256,13 +277,13 @@ fn draw_image(
         (tlas, before_future.join(blas_future).join(tlas_future))
     };
 
-    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+    let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
         context.device().clone(),
         StandardDescriptorSetAllocatorCreateInfo::default(),
-    );
+    ));
 
-    let descriptor_set = PersistentDescriptorSet::new(
-        &descriptor_set_allocator,
+    let descriptor_set = DescriptorSet::new(
+        descriptor_set_allocator.clone(),
         pipeline.layout().set_layouts().get(0).unwrap().clone(),
         [WriteDescriptorSet::acceleration_structure(0, tlas)],
         [],
@@ -270,7 +291,7 @@ fn draw_image(
     .unwrap();
 
     let mut builder = AutoCommandBufferBuilder::primary(
-        &command_buffer_allocator,
+        command_buffer_allocator.clone(),
         context.graphics_queue().queue_family_index(),
         CommandBufferUsage::OneTimeSubmit,
     )
@@ -296,11 +317,12 @@ fn draw_image(
             0,
             descriptor_set.clone(),
         )
-        .unwrap()
-        .draw(quad_buffer.len() as u32, 1, 0, 0)
-        .unwrap()
-        .end_rendering()
         .unwrap();
+
+    unsafe { builder.draw(quad_buffer.len() as u32, 1, 0, 0) }.unwrap();
+
+    builder.end_rendering().unwrap();
+
     let command_buffer = builder.build().unwrap();
     command_buffer
         .execute_after(before_future, context.graphics_queue().clone())
